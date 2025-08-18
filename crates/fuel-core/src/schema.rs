@@ -4,24 +4,24 @@ use crate::fuel_core_graphql_api::{
 };
 use anyhow::anyhow;
 use async_graphql::{
-    connection::{
-        query,
-        Connection,
-        CursorType,
-        Edge,
-        EmptyFields,
-    },
-    parser::types::OperationType,
     Context,
     MergedObject,
     MergedSubscription,
     OutputType,
     Schema,
     SchemaBuilder,
+    connection::{
+        Connection,
+        CursorType,
+        Edge,
+        EmptyFields,
+        query,
+    },
+    parser::types::OperationType,
 };
 use fuel_core_storage::{
-    iter::IterDirection,
     Result as StorageResult,
+    iter::IterDirection,
 };
 use futures::{
     Stream,
@@ -78,7 +78,11 @@ pub struct Query(
 pub struct Mutation(dap::DapMutation, tx::TxMutation, block::BlockMutation);
 
 #[derive(MergedSubscription, Default)]
-pub struct Subscription(tx::TxStatusSubscription, storage::StorageSubscription);
+pub struct Subscription(
+    tx::TxStatusSubscription,
+    storage::StorageSubscription,
+    block::BlockSubscription,
+);
 
 pub type CoreSchema = Schema<Query, Mutation, Subscription>;
 pub type CoreSchemaBuilder = SchemaBuilder<Query, Mutation, Subscription>;

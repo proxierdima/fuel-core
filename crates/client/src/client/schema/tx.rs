@@ -1,11 +1,8 @@
 use crate::client::{
+    PageDirection,
+    PaginatedResult,
+    PaginationRequest,
     schema::{
-        coins::ExcludeInput,
-        schema,
-        tx::{
-            transparent_receipt::Receipt,
-            transparent_tx::Output,
-        },
         Address,
         AssetId,
         ConnectionArgsFields,
@@ -18,17 +15,21 @@ use crate::client::{
         U16,
         U32,
         U64,
+        UtxoId,
+        coins::ExcludeInput,
+        schema,
+        tx::{
+            transparent_receipt::Receipt,
+            transparent_tx::Output,
+        },
     },
     types::TransactionResponse,
-    PageDirection,
-    PaginatedResult,
-    PaginationRequest,
 };
 use fuel_core_types::{
     fuel_tx,
     fuel_types::{
-        canonical::Deserialize,
         Bytes32,
+        canonical::Deserialize,
     },
     fuel_vm,
     services::executor::{
@@ -137,7 +138,7 @@ impl TryFrom<OpaqueTransaction> for fuel_tx::Transaction {
     type Error = ConversionError;
 
     fn try_from(value: OpaqueTransaction) -> Result<Self, Self::Error> {
-        let bytes = value.raw_payload.0 .0;
+        let bytes = value.raw_payload.0.0;
         fuel_tx::Transaction::from_bytes(bytes.as_slice())
             .map_err(ConversionError::TransactionFromBytesError)
     }
@@ -170,16 +171,16 @@ impl TryFrom<ProgramState> for fuel_vm::ProgramState {
     fn try_from(state: ProgramState) -> Result<Self, Self::Error> {
         Ok(match state.return_type {
             ReturnType::Return => fuel_vm::ProgramState::Return({
-                let b = state.data.0 .0;
+                let b = state.data.0.0;
                 let b: [u8; 8] =
                     b.try_into().map_err(|_| ConversionError::BytesLength)?;
                 u64::from_be_bytes(b)
             }),
             ReturnType::ReturnData => fuel_vm::ProgramState::ReturnData({
-                Bytes32::try_from(state.data.0 .0.as_slice())?
+                Bytes32::try_from(state.data.0.0.as_slice())?
             }),
             ReturnType::Revert => fuel_vm::ProgramState::Revert({
-                let b = state.data.0 .0;
+                let b = state.data.0.0;
                 let b: [u8; 8] =
                     b.try_into().map_err(|_| ConversionError::BytesLength)?;
                 u64::from_be_bytes(b)
@@ -250,13 +251,20 @@ pub struct SuccessStatusWithTransaction {
 
 #[derive(cynic::QueryFragment, Clone, Debug)]
 #[cynic(schema_path = "./assets/schema.sdl")]
+pub struct ResolvedOutput {
+    pub utxo_id: UtxoId,
+    pub output: Output,
+}
+
+#[derive(cynic::QueryFragment, Clone, Debug)]
+#[cynic(schema_path = "./assets/schema.sdl")]
 pub struct PreconfirmationSuccessStatus {
     pub tx_pointer: TxPointer,
     pub transaction_id: TransactionId,
     pub total_fee: U64,
     pub total_gas: U64,
     pub receipts: Option<Vec<Receipt>>,
-    pub resolved_outputs: Option<Vec<Output>>,
+    pub resolved_outputs: Option<Vec<ResolvedOutput>>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Debug)]
@@ -271,7 +279,7 @@ pub struct PreconfirmationSuccessStatusWithTransaction {
     pub total_gas: U64,
     pub transaction: Option<OpaqueTransaction>,
     pub receipts: Option<Vec<Receipt>>,
-    pub resolved_outputs: Option<Vec<Output>>,
+    pub resolved_outputs: Option<Vec<ResolvedOutput>>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Debug)]
@@ -307,7 +315,7 @@ pub struct PreconfirmationFailureStatus {
     pub total_fee: U64,
     pub total_gas: U64,
     pub receipts: Option<Vec<Receipt>>,
-    pub resolved_outputs: Option<Vec<Output>>,
+    pub resolved_outputs: Option<Vec<ResolvedOutput>>,
     pub reason: String,
 }
 
@@ -323,7 +331,7 @@ pub struct PreconfirmationFailureStatusWithTransaction {
     pub total_gas: U64,
     pub transaction: Option<OpaqueTransaction>,
     pub receipts: Option<Vec<Receipt>>,
-    pub resolved_outputs: Option<Vec<Output>>,
+    pub resolved_outputs: Option<Vec<ResolvedOutput>>,
     pub reason: String,
 }
 
@@ -464,14 +472,21 @@ pub struct TransactionsByOwnerQuery {
     pub transactions_by_owner: TransactionConnection,
 }
 
+#[derive(cynic::QueryVariables, Debug)]
+pub struct StatusChangeSubscriptionArgs {
+    pub id: TransactionId,
+    #[cynic(skip_serializing_if = "Option::is_none")]
+    pub include_preconfirmation: Option<bool>,
+}
+
 #[derive(cynic::QueryFragment, Clone, Debug)]
 #[cynic(
     schema_path = "./assets/schema.sdl",
     graphql_type = "Subscription",
-    variables = "TxIdArgs"
+    variables = "StatusChangeSubscriptionArgs"
 )]
 pub struct StatusChangeSubscription {
-    #[arguments(id: $id)]
+    #[arguments(id: $id, includePreconfirmation: $include_preconfirmation)]
     pub status_change: TransactionStatus,
 }
 
@@ -487,6 +502,15 @@ pub struct TxWithEstimatedPredicatesArg {
     pub tx: HexString,
     #[cynic(skip_serializing_if = "Option::is_none")]
     pub estimate_predicates: Option<bool>,
+}
+
+#[derive(cynic::QueryVariables)]
+pub struct SubmitAndAwaitStatusArg {
+    pub tx: HexString,
+    #[cynic(skip_serializing_if = "Option::is_none")]
+    pub estimate_predicates: Option<bool>,
+    #[cynic(skip_serializing_if = "Option::is_none")]
+    pub include_preconfirmation: Option<bool>,
 }
 
 #[derive(cynic::QueryFragment, Clone, Debug)]
@@ -599,6 +623,24 @@ pub struct DryRun {
 }
 
 #[derive(cynic::QueryFragment, Clone, Debug)]
+#[cynic(schema_path = "./assets/schema.sdl")]
+pub struct DryRunStorageReads {
+    pub tx_statuses: Vec<DryRunTransactionExecutionStatus>,
+    pub storage_reads: Vec<super::storage_read_replay::StorageReadReplayEvent>,
+}
+
+#[derive(cynic::QueryFragment, Clone, Debug)]
+#[cynic(
+    schema_path = "./assets/schema.sdl",
+    graphql_type = "Query",
+    variables = "DryRunArg"
+)]
+pub struct DryRunRecordStorageReads {
+    #[arguments(txs: $txs, utxoValidation: $utxo_validation, gasPrice: $gas_price, blockHeight: $block_height)]
+    pub dry_run_record_storage_reads: DryRunStorageReads,
+}
+
+#[derive(cynic::QueryFragment, Clone, Debug)]
 #[cynic(
     schema_path = "./assets/schema.sdl",
     graphql_type = "Mutation",
@@ -635,10 +677,10 @@ pub struct SubmitAndAwaitSubscriptionWithTransaction {
 #[cynic(
     schema_path = "./assets/schema.sdl",
     graphql_type = "Subscription",
-    variables = "TxWithEstimatedPredicatesArg"
+    variables = "SubmitAndAwaitStatusArg"
 )]
 pub struct SubmitAndAwaitStatusSubscription {
-    #[arguments(tx: $tx, estimatePredicates: $estimate_predicates)]
+    #[arguments(tx: $tx, estimatePredicates: $estimate_predicates, includePreconfirmation: $include_preconfirmation)]
     pub submit_and_await_status: TransactionStatus,
 }
 
@@ -646,6 +688,13 @@ pub struct SubmitAndAwaitStatusSubscription {
 #[cynic(schema_path = "./assets/schema.sdl", graphql_type = "Query")]
 pub struct AllReceipts {
     pub all_receipts: Vec<Receipt>,
+}
+
+#[derive(cynic::QueryFragment, Clone, Debug)]
+#[cynic(schema_path = "./assets/schema.sdl", graphql_type = "Subscription")]
+pub struct PreconfirmationsSubscription {
+    #[cynic(rename = "alpha__preconfirmations")]
+    pub preconfirmations: TransactionStatus,
 }
 
 #[cfg(test)]

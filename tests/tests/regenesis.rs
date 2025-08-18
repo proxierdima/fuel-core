@@ -12,17 +12,14 @@ use fuel_core_client::client::{
         PageDirection,
         PaginationRequest,
     },
-    types::{
-        message::MessageStatus,
-        TransactionStatus,
-    },
+    types::message::MessageStatus,
 };
 use fuel_core_types::{
     blockchain::header::LATEST_STATE_TRANSITION_VERSION,
     fuel_asm::{
-        op,
         GTFArgs,
         RegId,
+        op,
     },
     fuel_crypto::PublicKey,
     fuel_merkle::binary,
@@ -31,9 +28,9 @@ use fuel_core_types::{
 };
 use itertools::Itertools;
 use rand::{
-    rngs::StdRng,
     Rng,
     SeedableRng,
+    rngs::StdRng,
 };
 use std::{
     collections::BTreeMap,
@@ -41,8 +38,8 @@ use std::{
     path::PathBuf,
 };
 use tempfile::{
-    tempdir,
     TempDir,
+    tempdir,
 };
 use test_helpers::{
     fuel_core_driver::FuelCoreDriver,
@@ -187,8 +184,8 @@ async fn test_regenesis_spent_messages_are_preserved() -> anyhow::Result<()> {
     let nonce = [123; 32].into();
     let state_config = fuel_core::chain_config::StateConfig {
         messages: vec![fuel_core::chain_config::MessageConfig {
-            sender: rng.gen(),
-            recipient: rng.gen(),
+            sender: rng.r#gen(),
+            recipient: rng.r#gen(),
             nonce,
             amount: 123,
             data: vec![],
@@ -215,7 +212,7 @@ async fn test_regenesis_spent_messages_are_preserved() -> anyhow::Result<()> {
     let tx_with_message = TransactionBuilder::script(vec![], vec![])
         .add_unsigned_message_input(
             secret,
-            rng.gen(),
+            rng.r#gen(),
             nonce,
             Default::default(),
             Default::default(),
@@ -283,7 +280,7 @@ async fn test_regenesis_processed_transactions_are_preserved() -> anyhow::Result
     let tx = TransactionBuilder::script(vec![], vec![])
         .add_unsigned_coin_input(
             secret,
-            rng.gen(),
+            rng.r#gen(),
             1234,
             Default::default(),
             Default::default(),
@@ -296,12 +293,8 @@ async fn test_regenesis_processed_transactions_are_preserved() -> anyhow::Result
         .finalize_as_transaction();
     core.client.submit_and_await_commit(&tx).await.unwrap();
 
-    let TransactionStatus::SqueezedOut { reason } =
-        core.client.submit_and_await_commit(&tx).await.unwrap()
-    else {
-        panic!("Expected transaction to be squeezed out")
-    };
-    assert!(reason.contains("Transaction id was already used"));
+    let err = core.client.submit_and_await_commit(&tx).await.unwrap_err();
+    assert!(err.to_string().contains("Transaction id already exists"));
 
     // Stop the node, keep the db
     let db_dir = core.kill().await;
@@ -326,15 +319,8 @@ async fn test_regenesis_processed_transactions_are_preserved() -> anyhow::Result
     ])
     .await?;
 
-    let TransactionStatus::SqueezedOut { reason } =
-        core.client.submit_and_await_commit(&tx).await.unwrap()
-    else {
-        panic!("Expected transaction to be squeezed out")
-    };
-    assert!(
-        reason.contains("Transaction id was already used"),
-        "Unexpected message {reason:?}"
-    );
+    let err = core.client.submit_and_await_commit(&tx).await.unwrap_err();
+    assert!(err.to_string().contains("Transaction id already exists"));
 
     core.kill().await;
     Ok(())
@@ -368,7 +354,7 @@ async fn test_regenesis_message_proofs_are_preserved() -> anyhow::Result<()> {
     let tx = TransactionBuilder::script(script, script_data)
         .add_unsigned_coin_input(
             secret,
-            rng.gen(),
+            rng.r#gen(),
             100_000_000,
             base_asset_id,
             Default::default(),
@@ -615,8 +601,8 @@ fn random_key(rng: &mut StdRng) -> (SecretKey, Address) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn starting_node_with_overwritten_old_poa_key_doesnt_rollback_the_state(
-) -> anyhow::Result<()> {
+async fn starting_node_with_overwritten_old_poa_key_doesnt_rollback_the_state()
+-> anyhow::Result<()> {
     let mut rng = StdRng::seed_from_u64(1234);
     let state_config = StateConfig::local_testnet();
     let mut original_chain_config = ChainConfig::local_testnet();
@@ -749,8 +735,8 @@ async fn starting_empty_node_with_overwritten_poa_works() -> anyhow::Result<()> 
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn starting_node_with_overwritten_new_poa_key_rollbacks_the_state(
-) -> anyhow::Result<()> {
+async fn starting_node_with_overwritten_new_poa_key_rollbacks_the_state()
+-> anyhow::Result<()> {
     let mut rng = StdRng::seed_from_u64(1234);
     let state_config = StateConfig::local_testnet();
     let mut original_chain_config = ChainConfig::local_testnet();
@@ -832,8 +818,8 @@ async fn starting_node_with_overwritten_new_poa_key_rollbacks_the_state(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn starting_node_with_overwritten_new_poa_key_from_the_future_doesnt_rollback_the_state(
-) -> anyhow::Result<()> {
+async fn starting_node_with_overwritten_new_poa_key_from_the_future_doesnt_rollback_the_state()
+-> anyhow::Result<()> {
     let mut rng = StdRng::seed_from_u64(1234);
     let state_config = StateConfig::local_testnet();
     let mut original_chain_config = ChainConfig::local_testnet();

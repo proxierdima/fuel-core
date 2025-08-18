@@ -2,11 +2,11 @@ use crate::{
     bootstrap_node,
     tests_helper::{
         GenesisFuelCoreDriver,
-        LatestFuelCoreDriver,
-        Version36FuelCoreDriver,
         IGNITION_TESTNET_SNAPSHOT,
+        LatestFuelCoreDriver,
         POA_SECRET_KEY,
-        V36_TESTNET_SNAPSHOT,
+        V44_TESTNET_SNAPSHOT,
+        Version44FuelCoreDriver,
     },
 };
 use latest_fuel_core_type::{
@@ -49,8 +49,8 @@ async fn latest_binary_is_backward_compatible_and_can_load_testnet_config() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_genesis_binary(
-) {
+async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_genesis_binary()
+ {
     let (_bootstrap_node, addr) =
         bootstrap_node(IGNITION_TESTNET_SNAPSHOT).await.unwrap();
 
@@ -114,22 +114,22 @@ async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_gene
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_v36_binary() {
-    let (_bootstrap_node, addr) = bootstrap_node(V36_TESTNET_SNAPSHOT).await.unwrap();
+async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_v44_binary() {
+    let (_bootstrap_node, addr) = bootstrap_node(V44_TESTNET_SNAPSHOT).await.unwrap();
 
     // Given
-    let v36_keypair = SecpKeypair::generate();
-    let hexed_secret = hex::encode(v36_keypair.secret().to_bytes());
-    let _v36_node = Version36FuelCoreDriver::spawn(&[
+    let v44_keypair = SecpKeypair::generate();
+    let hexed_secret = hex::encode(v44_keypair.secret().to_bytes());
+    let _v44_node = Version44FuelCoreDriver::spawn(&[
         "--service-name",
-        "V36Producer",
+        "V44Producer",
         "--debug",
         "--poa-interval-period",
         "1s",
         "--consensus-key",
         POA_SECRET_KEY,
         "--snapshot",
-        V36_TESTNET_SNAPSHOT,
+        V44_TESTNET_SNAPSHOT,
         "--enable-p2p",
         "--keypair",
         hexed_secret.as_str(),
@@ -142,7 +142,7 @@ async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_v36_
     .unwrap();
 
     // Starting node that uses latest fuel core.
-    // It will connect to the v36 node and sync blocks.
+    // It will connect to the v44 node and sync blocks.
     let latest_keypair = SecpKeypair::generate();
     let hexed_secret = hex::encode(latest_keypair.secret().to_bytes());
     let latest_node = LatestFuelCoreDriver::spawn(&[
@@ -152,7 +152,7 @@ async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_v36_
         "--poa-instant",
         "false",
         "--snapshot",
-        V36_TESTNET_SNAPSHOT,
+        V44_TESTNET_SNAPSHOT,
         "--enable-p2p",
         "--keypair",
         hexed_secret.as_str(),
@@ -177,8 +177,8 @@ async fn latest_binary_is_backward_compatible_and_follows_blocks_created_by_v36_
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn latest_binary_is_backward_compatible_and_can_deserialize_errors_from_genesis_binary(
-) {
+async fn latest_binary_is_backward_compatible_and_can_deserialize_errors_from_genesis_binary()
+ {
     // Given
     let node_with_genesis_transition = LatestFuelCoreDriver::spawn(&[
         "--service-name",

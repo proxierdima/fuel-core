@@ -5,7 +5,13 @@ use fuel_core_tx_status_manager::{
     ports::P2PPreConfirmationGossipData,
     service::ProtocolPublicKey,
 };
-use fuel_core_types::fuel_tx::Address;
+use fuel_core_types::{
+    fuel_tx::Address,
+    services::p2p::{
+        GossipsubMessageAcceptance,
+        GossipsubMessageInfo,
+    },
+};
 
 #[cfg(feature = "p2p")]
 impl fuel_core_tx_status_manager::ports::P2PSubscriptions for P2PAdapter {
@@ -13,17 +19,31 @@ impl fuel_core_tx_status_manager::ports::P2PSubscriptions for P2PAdapter {
 
     fn gossiped_tx_statuses(&self) -> BoxStream<Self::GossipedStatuses> {
         use tokio_stream::{
-            wrappers::BroadcastStream,
             StreamExt,
+            wrappers::BroadcastStream,
         };
 
-        if let Some(service) = &self.service {
-            Box::pin(
+        match &self.service {
+            Some(service) => Box::pin(
                 BroadcastStream::new(service.subscribe_preconfirmations())
                     .filter_map(|result| result.ok()),
-            )
-        } else {
-            fuel_core_services::stream::IntoBoxStream::into_boxed(tokio_stream::pending())
+            ),
+            _ => fuel_core_services::stream::IntoBoxStream::into_boxed(
+                tokio_stream::pending(),
+            ),
+        }
+    }
+
+    fn notify_gossip_transaction_validity(
+        &self,
+        message_info: GossipsubMessageInfo,
+        validity: GossipsubMessageAcceptance,
+    ) -> anyhow::Result<()> {
+        match &self.service {
+            Some(service) => {
+                service.notify_gossip_transaction_validity(message_info, validity)
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -34,6 +54,14 @@ impl fuel_core_tx_status_manager::ports::P2PSubscriptions for P2PAdapter {
 
     fn gossiped_tx_statuses(&self) -> BoxStream<Self::GossipedStatuses> {
         Box::pin(fuel_core_services::stream::pending())
+    }
+
+    fn notify_gossip_transaction_validity(
+        &self,
+        _message_info: GossipsubMessageInfo,
+        _validity: GossipsubMessageAcceptance,
+    ) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

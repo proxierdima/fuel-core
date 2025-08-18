@@ -1,7 +1,7 @@
 use super::HexString;
 use crate::client::schema::{
-    schema,
     U32,
+    schema,
 };
 
 #[derive(cynic::QueryFragment, Clone, Debug)]
@@ -16,6 +16,17 @@ impl From<StorageReadReplayEvent>
 {
     fn from(event: StorageReadReplayEvent) -> Self {
         fuel_core_types::services::executor::StorageReadReplayEvent {
+            column: event.column.into(),
+            key: event.key.into(),
+            value: event.value.map(Into::into),
+        }
+    }
+}
+impl From<fuel_core_types::services::executor::StorageReadReplayEvent>
+    for StorageReadReplayEvent
+{
+    fn from(event: fuel_core_types::services::executor::StorageReadReplayEvent) -> Self {
+        StorageReadReplayEvent {
             column: event.column.into(),
             key: event.key.into(),
             value: event.value.map(Into::into),

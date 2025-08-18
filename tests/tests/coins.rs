@@ -11,13 +11,13 @@ use fuel_core::{
     },
 };
 use fuel_core_client::client::{
-    types::CoinType,
     FuelClient,
+    types::CoinType,
 };
 use fuel_core_types::fuel_tx::*;
 use rand::{
-    prelude::StdRng,
     SeedableRng,
+    prelude::StdRng,
 };
 use test_helpers::{
     assemble_tx::AssembleAndRunTx,
@@ -27,8 +27,8 @@ use test_helpers::{
 mod coin {
     use super::*;
     use fuel_core::chain_config::{
-        coin_config_helpers::CoinConfigGenerator,
         ChainConfig,
+        coin_config_helpers::CoinConfigGenerator,
     };
     use fuel_core_client::client::types::CoinType;
     use fuel_core_types::{
@@ -58,7 +58,7 @@ mod coin {
             ]
             .into_iter()
             .map(|(owner, amount, asset_id)| CoinConfig {
-                owner,
+                owner: owner.into(),
                 amount,
                 asset_id,
                 ..coin_generator.generate()
@@ -99,25 +99,29 @@ mod coin {
     #[tokio::test]
     async fn excludes_spent_coins() {
         let mut rng = StdRng::seed_from_u64(1234);
-        let asset_id_a: AssetId = rng.gen();
-        let asset_id_b: AssetId = rng.gen();
+        let asset_id_a: AssetId = rng.r#gen();
+        let asset_id_b: AssetId = rng.r#gen();
         let secret_key: SecretKey = SecretKey::random(&mut rng);
         let pk = secret_key.public_key();
         let owner = Input::owner(&pk);
         let cp = ConsensusParameters::default();
         let context = setup(owner, asset_id_a, asset_id_b, &cp).await;
 
-        let burn_address: Address = rng.gen();
+        let burn_address: Address = rng.r#gen();
 
-        let balance_a = context
+        let balance_a: u64 = context
             .client
             .balance(&owner, Some(&asset_id_a))
             .await
+            .unwrap()
+            .try_into()
             .unwrap();
-        let balance_b = context
+        let balance_b: u64 = context
             .client
             .balance(&owner, Some(&asset_id_b))
             .await
+            .unwrap()
+            .try_into()
             .unwrap();
         let recipients = vec![
             (burn_address, asset_id_a, balance_a),
@@ -162,7 +166,7 @@ mod coin {
             .await
             .unwrap();
         assert_eq!(coins_per_asset.len(), 2);
-        assert!(coins_per_asset[0].len() >= 1);
+        assert!(!coins_per_asset[0].is_empty());
         assert!(coins_per_asset[0].amount() >= 1);
         assert_eq!(coins_per_asset[1].len(), 1);
     }
@@ -232,10 +236,10 @@ mod coin {
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::InsufficientCoins {
+                owner,
                 asset_id: asset_id_a,
                 collected_amount: 0,
-                max: MAX_INPUTS
             }
             .to_str_error_string()
         );
@@ -262,10 +266,10 @@ mod coin {
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::InsufficientCoins {
+                owner,
                 asset_id: asset_id_a,
                 collected_amount: 300,
-                max: MAX_INPUTS
             }
             .to_str_error_string()
         );
@@ -282,20 +286,18 @@ mod coin {
             .client
             .coins_to_spend(
                 &owner,
-                vec![
-                    (asset_id_a, 300, Some(MAX as u16)),
-                    (asset_id_b, 300, Some(MAX as u16)),
-                ],
+                vec![(asset_id_a, 300, Some(MAX)), (asset_id_b, 300, Some(MAX))],
                 None,
             )
             .await;
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::MaxCoinsReached {
+                owner,
                 asset_id: asset_id_a,
-                collected_amount: 0,
-                max: MAX
+                collected_amount: 250,
+                max: MAX,
             }
             .to_str_error_string()
         );
@@ -380,8 +382,10 @@ mod message_coin {
             .client
             .balance(&owner, Some(&base_asset_id))
             .await
+            .unwrap()
+            .try_into()
             .unwrap();
-        let burn_address: Address = rng.gen();
+        let burn_address: Address = rng.r#gen();
 
         context
             .client
@@ -427,7 +431,7 @@ mod message_coin {
     }
 
     async fn exclude_all(owner: Address) {
-        let (base_asset_id, context, max_inputs) = setup(owner).await;
+        let (base_asset_id, context, _max_inputs) = setup(owner).await;
 
         // query for 300 base assets
         let coins_per_asset = context
@@ -458,17 +462,17 @@ mod message_coin {
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::InsufficientCoins {
+                owner,
                 asset_id: base_asset_id,
                 collected_amount: 0,
-                max: max_inputs
             }
             .to_str_error_string()
         );
     }
 
     async fn query_more_than_we_have(owner: Address) {
-        let (base_asset_id, context, max_inputs) = setup(owner).await;
+        let (base_asset_id, context, _max_inputs) = setup(owner).await;
 
         // max coins reached
         let coins_per_asset = context
@@ -478,10 +482,10 @@ mod message_coin {
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::InsufficientCoins {
+                owner,
                 asset_id: base_asset_id,
                 collected_amount: 300,
-                max: max_inputs
             }
             .to_str_error_string()
         );
@@ -495,15 +499,16 @@ mod message_coin {
         // not enough inputs
         let coins_per_asset = context
             .client
-            .coins_to_spend(&owner, vec![(base_asset_id, 300, Some(MAX as u16))], None)
+            .coins_to_spend(&owner, vec![(base_asset_id, 300, Some(MAX))], None)
             .await;
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::MaxCoinsReached {
+                owner,
                 asset_id: base_asset_id,
-                collected_amount: 0,
-                max: MAX
+                collected_amount: 250,
+                max: MAX,
             }
             .to_str_error_string()
         );
@@ -533,7 +538,7 @@ mod all_coins {
             ]
             .into_iter()
             .map(|(owner, amount, asset_id)| CoinConfig {
-                owner,
+                owner: owner.into(),
                 amount,
                 asset_id,
                 ..coin_generator.generate()
@@ -601,7 +606,7 @@ mod all_coins {
             .await
             .unwrap();
         assert_eq!(coins_per_asset.len(), 2);
-        assert!(coins_per_asset[0].len() >= 1);
+        assert!(!coins_per_asset[0].is_empty());
         assert!(coins_per_asset[0].amount() >= 1);
         assert_eq!(coins_per_asset[1].len(), 1);
     }
@@ -626,7 +631,7 @@ mod all_coins {
     }
 
     async fn exclude_all(owner: Address, asset_id_b: AssetId) {
-        let (asset_id_a, context, max_inputs) = setup(owner, asset_id_b).await;
+        let (asset_id_a, context, _max_inputs) = setup(owner, asset_id_b).await;
 
         // query for 300 base assets
         let coins_per_asset = context
@@ -676,17 +681,17 @@ mod all_coins {
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::InsufficientCoins {
+                owner,
                 asset_id: asset_id_a,
                 collected_amount: 0,
-                max: max_inputs
             }
             .to_str_error_string()
         );
     }
 
     async fn query_more_than_we_have(owner: Address, asset_id_b: AssetId) {
-        let (asset_id_a, context, max_inputs) = setup(owner, asset_id_b).await;
+        let (asset_id_a, context, _max_inputs) = setup(owner, asset_id_b).await;
 
         // max coins reached
         let coins_per_asset = context
@@ -700,10 +705,10 @@ mod all_coins {
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::InsufficientCoins {
+                owner,
                 asset_id: asset_id_a,
                 collected_amount: 300,
-                max: max_inputs
             }
             .to_str_error_string()
         );
@@ -719,19 +724,17 @@ mod all_coins {
             .client
             .coins_to_spend(
                 &owner,
-                vec![
-                    (asset_id_a, 300, Some(MAX as u16)),
-                    (asset_id_b, 300, Some(MAX as u16)),
-                ],
+                vec![(asset_id_a, 300, Some(MAX)), (asset_id_b, 300, Some(MAX))],
                 None,
             )
             .await;
         assert!(coins_per_asset.is_err());
         assert_eq!(
             coins_per_asset.unwrap_err().to_string(),
-            CoinsQueryError::InsufficientCoinsForTheMax {
+            CoinsQueryError::MaxCoinsReached {
+                owner,
                 asset_id: asset_id_a,
-                collected_amount: 0,
+                collected_amount: 250,
                 max: MAX
             }
             .to_str_error_string()

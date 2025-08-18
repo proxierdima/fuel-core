@@ -8,7 +8,11 @@ keywords = ["blockchain", "cryptocurrencies", "fuel-client", "fuel-core"]
 license = { workspace = true }
 name = "fuel-core-shared-sequencer"
 repository = { workspace = true }
+rust-version = { workspace = true }
 version = { workspace = true }
+
+[features]
+test-helpers = []
 
 [dependencies]
 anyhow = { workspace = true }
@@ -29,6 +33,3 @@ tendermint-rpc = { version = "0.36", features = ["http-client"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
-
-[features]
-test-helpers = []

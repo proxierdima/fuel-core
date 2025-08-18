@@ -25,6 +25,8 @@ use fuel_core_producer::{
     },
 };
 use fuel_core_storage::{
+    Result as StorageResult,
+    StorageAsRef,
     iter::{
         IterDirection,
         IteratorOverTable,
@@ -37,8 +39,6 @@ use fuel_core_storage::{
         Transactions,
     },
     transactional::Changes,
-    Result as StorageResult,
-    StorageAsRef,
 };
 use fuel_core_types::{
     blockchain::{
@@ -63,9 +63,9 @@ use fuel_core_types::{
     services::{
         block_producer::Components,
         executor::{
+            DryRunResult,
             Result as ExecutorResult,
             StorageReadReplayEvent,
-            TransactionExecutionStatus,
             UncommittedResult,
         },
     },
@@ -131,8 +131,14 @@ impl fuel_core_producer::ports::DryRunner for ExecutorAdapter {
         block: Components<Vec<Transaction>>,
         forbid_fake_coins: Option<bool>,
         at_height: Option<BlockHeight>,
-    ) -> ExecutorResult<Vec<(Transaction, TransactionExecutionStatus)>> {
-        self.executor.dry_run(block, forbid_fake_coins, at_height)
+        record_storage_read_replay: bool,
+    ) -> ExecutorResult<DryRunResult> {
+        self.executor.dry_run(
+            block,
+            forbid_fake_coins,
+            at_height,
+            record_storage_read_replay,
+        )
     }
 }
 
@@ -153,12 +159,13 @@ impl fuel_core_producer::ports::Relayer for MaybeRelayerAdapter {
     ) -> anyhow::Result<DaBlockHeight> {
         #[cfg(feature = "relayer")]
         {
-            if let Some(sync) = &self.relayer_synced {
-                sync.await_at_least_synced(height).await?;
-                let highest = sync.get_finalized_da_height();
-                Ok(highest)
-            } else {
-                Ok(*height)
+            match &self.relayer_synced {
+                Some(sync) => {
+                    sync.await_at_least_synced(height).await?;
+                    let highest = sync.get_finalized_da_height();
+                    Ok(highest)
+                }
+                _ => Ok(*height),
             }
         }
         #[cfg(not(feature = "relayer"))]

@@ -6,6 +6,250 @@ and this project adheres to [Semantic Versioning](http://semver.org/).
 
 ## [Unreleased (see .changes folder)]
 
+## [Version 0.46.0]
+
+### Breaking
+- [3070](https://github.com/FuelLabs/fuel-core/pull/3070): Fix the `AssetDetails` endpoint to match GraphQL standards
+
+### Added
+- [3061](https://github.com/FuelLabs/fuel-core/pull/3061): Add tests showing that mints are correctly added and validated
+- [3074](https://github.com/FuelLabs/fuel-core/pull/3074): Added alpha version of new subscriptions for pre confirmations and new blocks.
+  These subscriptions are not final and may change in the future.
+  Subscriptions are disabled by default and can be enabled by setting `--expensive-subscriptions` via CLI.
+
+### Fixed
+- [3071](https://github.com/FuelLabs/fuel-core/pull/3071): Use outputs instead of events to compress blocks
+
+## [Version 0.45.1]
+
+### Breaking
+- [3022](https://github.com/FuelLabs/fuel-core/pull/3022): Support rolling back Relayer DB.
+- [3056](https://github.com/FuelLabs/fuel-core/pull/3056): Bump Rust version to 1.86.0
+- [3058](https://github.com/FuelLabs/fuel-core/pull/3058): upgrade `wasmtime` and `thiserror` dependencies
+
+### Added
+- [2959](https://github.com/FuelLabs/fuel-core/pull/2959): Add `Registrations` table to the compression database. This is merkleized.
+- [3027](https://github.com/FuelLabs/fuel-core/pull/3027): Support state rewind for compression DB.
+- [3054](https://github.com/FuelLabs/fuel-core/pull/3054): Added a new configuration option `--p2p-cache-size` to control the size of the p2p req/res protocol cache size.
+
+### Changed
+- [3030](https://github.com/FuelLabs/fuel-core/pull/3030): Disable dependency on blob transactions in transaction pool.
+- [3033](https://github.com/FuelLabs/fuel-core/pull/3033): Use ubuntu:24.04 to build x86_64 binary
+- [3060](https://github.com/FuelLabs/fuel-core/pull/3060): Use v44 STF if forward-compatibility test
+- [3062](https://github.com/FuelLabs/fuel-core/pull/3062): Increase default transmission size to 260MB, to support 2.5MB blocks by default during synchronization
+
+### Fixed
+- [3048](https://github.com/FuelLabs/fuel-core/pull/3048): The `MaxCoinsReached` error is now thrown when the target reached the max input limit.
+
+## [Version 0.44.0]
+
+### Breaking
+- [2887](https://github.com/FuelLabs/fuel-core/pull/2887): Bump Rust version to `1.85.0`.
+  Starting with this release, newly generated WASM state transition functions are no longer compatible with old versions of the `fuel-core`. So, the change breaks forward compatibility for the network and each node should start to use a new `fuel-core` release.
+- [2943](https://github.com/FuelLabs/fuel-core/pull/2943): Registry root calculation for compression tables no longer accounts for the evictor cache.
+- [2947](https://github.com/FuelLabs/fuel-core/pull/2947): Upgrade to 2024 Rust edition.
+- [2958](https://github.com/FuelLabs/fuel-core/pull/2958): Changed return type of `balance` endpoint from `u64` to `u128`
+- [3002](https://github.com/FuelLabs/fuel-core/pull/3002): Update `fuel-vm` to `0.61.1`. In doing this, we've changed Receipts to use the `SubId` scalar type for sub asset IDs.
+
+### Added
+- [2954](https://github.com/FuelLabs/fuel-core/pull/2954): Made `registry` mod public in `fuel-core-compression`
+- [2956](https://github.com/FuelLabs/fuel-core/pull/2956): Add excluded_contract filter to extract of transaction from TxPool.
+- [2994](https://github.com/FuelLabs/fuel-core/pull/2994): Simple makefile with basic commands.
+- [3004](https://github.com/FuelLabs/fuel-core/pull/3004): Additional error logs for Ethereum provider failures.
+
+### Changed
+- [3021](https://github.com/FuelLabs/fuel-core/pull/3021): Updated fuel-vm to 0.62.0, see https://github.com/fuelLabs/fuel-vm/releases/v0.62.0
+
+### Fixed
+- [2969](https://github.com/FuelLabs/fuel-core/pull/2969): Ensure that vm heap memory is zeroed out on rellocation after `reset`. Adds support for `GM::GetGasPrice` Bumps `fuel-vm` to `0.60.2`.
+- [2984](https://github.com/FuelLabs/fuel-core/pull/2984): Fix client coins endpoint so that passing `None` for `asset_id` no longer defaults to `AssetId::default()` but correctly returns all asset types.
+- [2987](https://github.com/FuelLabs/fuel-core/pull/2987): Make txpool pre-conf broadcast conditional on there being some txs in the list
+- [2989](https://github.com/FuelLabs/fuel-core/pull/2989): Prevent syncing compression database from genesis if override cli arg `--da-compression-starting-height` is provided.
+- [2992](https://github.com/FuelLabs/fuel-core/pull/2992): Make sure assemble tx doesn't count message data inputs as spendable inputs for covering fee
+- [2993](https://github.com/FuelLabs/fuel-core/pull/2993): Pin the graphiql playground to v3, and cache the result to be reused across multiple calls to render the playground.
+
+### Removed
+- [2955](https://github.com/FuelLabs/fuel-core/pull/2955): Remove unnecessary lifetime constraints on fuel-core-client.
+
+## [Version 0.43.2]
+
+### Fixed
+
+- [2978](https://github.com/FuelLabs/fuel-core/pull/2978): Add method to override starting syncing height for compression service if starting from scratch.
+
+## [Version 0.43.1]
+
+### Fixed
+
+- [2964](https://github.com/FuelLabs/fuel-core/pull/2964): Ensure that vm heap memory is zeroed out on rellocation after `reset`. Adds support for `GM::GetGasPrice` Bumps `fuel-vm` to `0.60.2`.
+
+## [Version 0.43.0]
+
+### Breaking
+- [2882](https://github.com/FuelLabs/fuel-core/pull/2882): Changed the type of the `resolved_outputs` for pre-confirmations. Now it also includes `Utxoid`. `resolved_outputs` field contains only `Change` and `Variable` outputs, so the `UtxoId` for them could be hard to derive, if transaction has known inputs. This information should help to create dependent transactions more easily.
+- [2900](https://github.com/FuelLabs/fuel-core/pull/2900): Get rid of `Deref` impl on `ImportResult` by introducing wrapper type.
+- [2909](https://github.com/FuelLabs/fuel-core/pull/2909): Compressed block headers now include a merkle root of the temporal registry after compression was performed.
+- [2931](https://github.com/FuelLabs/fuel-core/pull/2931): In `fuel-core-compression`, the `compress` function now takes a reference to `Config` instead of the value.
+
+### Added
+- [2848](https://github.com/FuelLabs/fuel-core/pull/2848): Link all components of preconfirmations and add E2E tests.
+- [2882](https://github.com/FuelLabs/fuel-core/pull/2882): Listen to tx status update from `TxStatusManager` in `TxPool`. Added logic to clean up transactions from the pool if received squeezed out pre confirmations. Added logic to promote transactions on sentry nodes when receive pre-confirmation.
+- [2885](https://github.com/FuelLabs/fuel-core/pull/2885): Notify P2P from `TxStatusManager` in case of bad preconfirmation message.
+- [2901](https://github.com/FuelLabs/fuel-core/pull/2901): New query `dryRunRecordStorageReads` which works like `dryRun` but also returns storage reads, allowing use of execution tracer or local debugger
+- [2912](https://github.com/FuelLabs/fuel-core/pull/2912): Add the `allow_partial` parameter to the `coinsToSpend` query. The default value of this parameters is `false` to preserve the old behavior. If set to `true`, the query returns available coins instead of failing when the requested amount is unavailable.
+- [2914](https://github.com/FuelLabs/fuel-core/pull/2914): Tests ensuring the proof generation and validation of tables with sparse and merklized blueprints work.
+
+### Changed
+- [2859](https://github.com/FuelLabs/fuel-core/pull/2859): Swap out off-chain worker compression for dedicated compression service in `fuel-core-bin`.
+- [2914](https://github.com/FuelLabs/fuel-core/pull/2914): Break out test logic to trait methods for `root_storage_tests` and `basic_merkleized_storage_tests` test macros.
+- [2925](https://github.com/FuelLabs/fuel-core/pull/2925): Make preconfirmation optional on API endpoints.
+
+### Fixed
+- [2918](https://github.com/FuelLabs/fuel-core/pull/2918): Only cancel background work if primary RocksDB instance is dropped
+- [2935](https://github.com/FuelLabs/fuel-core/pull/2935): The change rejects transactions immediately, if they use spent coins. `TxPool` has a SpentInputs LRU cache, storing all spent coins.
+
+### Removed
+- [2859](https://github.com/FuelLabs/fuel-core/pull/2859): Removed DA compression from off-chain worker in favor of dedicated compression service in `fuel-core-bin`.
+
+## [Version 0.42.0]
+
+### Breaking
+- [2648](https://github.com/FuelLabs/fuel-core/pull/2648): Add feature-flagged field to block header `fault_proving_header` that contains a commitment to all transaction ids.
+- [2678](https://github.com/FuelLabs/fuel-core/pull/2678): Removed public accessors for `BlockHeader` fields and replaced with methods instead, moved `tx_id_commitment` to the application header of `BlockHeaderV2`.
+- [2746](https://github.com/FuelLabs/fuel-core/pull/2746): Breaking changes to the CLI arguments:
+  - To disable `random-walk` just don't specify it. Before it required to use `--random-walk 0`.  
+  - Next CLI arguments were renamed:
+    - `relayer-min-duration-s` -> `relayer-min-duration`
+    - `relayer-eth-sync-call-freq-s` -> `relayer-eth-sync-call-freq`
+    - `relayer-eth-sync-log-freq-s` -> `relayer-eth-sync-log-freq`
+  - Default value for the `heartbeat-idle-duration` was changed from `1s` to `100ms`. So information about new block will be propagated faster by default.
+  - All CLI arguments below use time(like `100ms`, `1s`, `1d`, etc.) use as a flag argument instead of number of seconds:
+    - `random-walk`
+    - `connection-idle-timeout`
+    - `info-interval`
+    - `identify-interval`
+    - `request-timeout`
+    - `connection-keep-alive`
+    - `heartbeat-send-duration`
+    - `heartbeat-idle-duration`
+    - `heartbeat-check-interval`
+    - `heartbeat-max-avg-interval`
+    - `heartbeat-max-time-since-last`
+    - `relayer-min-duration`
+    - `relayer-eth-sync-call-freq`
+    - `relayer-eth-sync-log-freq`
+- [2840](https://github.com/FuelLabs/fuel-core/pull/2840): CLI argument `vm-backtrace` is deprecated and does nothing. It will be removed in a future version of `fuel-core`.
+  The `extra_tx_checks` field was renamed into `forbid_fake_coins` that affects JSON based serialization/deserialization.
+  Renamed `extra_tx_checks_default` field into `forbid_fake_coins_default`.
+
+### Added
+- [2150](https://github.com/FuelLabs/fuel-core/pull/2150): Upgraded `libp2p` to `0.54.1` and introduced `ConnectionLimiter` to limit pending incoming/outgoing connections.
+- [2491](https://github.com/FuelLabs/fuel-core/pull/2491): Storage read replays of historical blocks for execution tracing. Only available behind `--historical-execution` flag.
+- [2619](https://github.com/FuelLabs/fuel-core/pull/2619): Add possibility to submit list of changes to rocksdb.
+- [2666](https://github.com/FuelLabs/fuel-core/pull/2666): Added two new CLI arguments to control the GraphQL queries consistency: `--graphql-block-height-tolerance` (default: `10`) and `--graphql-block-height-min-timeout` (default: `30s`). If a request requires a specific block height and the node is slightly behind, it will wait instead of failing.
+- [2682](https://github.com/FuelLabs/fuel-core/pull/2682): Added GraphQL APIs to get contract storage and balances for current and past blocks.
+- [2719](https://github.com/FuelLabs/fuel-core/pull/2719): Merklized DA compression temporal registry tables.
+- [2722](https://github.com/FuelLabs/fuel-core/pull/2722): Service definition for state root service.
+- [2724](https://github.com/FuelLabs/fuel-core/pull/2724): Explicit error type for merkleized storage.
+- [2726](https://github.com/FuelLabs/fuel-core/pull/2726): Add a new gossip-sub message for transaction preconfirmations
+- [2731](https://github.com/FuelLabs/fuel-core/pull/2731): Include `TemporalRegistry` trait implementations for v2 tables.
+- [2733](https://github.com/FuelLabs/fuel-core/pull/2733): Add a pending pool transaction that allow transaction to wait a bit of time if an input is missing instead of direct delete.
+- [2742](https://github.com/FuelLabs/fuel-core/pull/2742): Added API crate for merkle root service.
+- [2756](https://github.com/FuelLabs/fuel-core/pull/2756): Add new service for managing pre-confirmations
+- [2769](https://github.com/FuelLabs/fuel-core/pull/2769): Added a new `assembleTx` GraphQL endpoint. The endpoint can be used to assemble the transaction based on the provided requirements.
+  
+  - The returned transaction contains:
+    - Input coins to cover `required_balances`
+    - Input coins to cover the fee of the transaction based on the gas price from `block_horizon`
+    - `Change` or `Destroy` outputs for all assets from the inputs
+    - `Variable` outputs in the case they are required during the execution
+    - `Contract` inputs and outputs in the case they are required during the execution
+    - Reserved witness slots for signed coins filled with `64` zeroes
+    - Set script gas limit(unless `script` is empty)
+    - Estimated predicates, if `estimate_predicates == true`
+  
+  - Returns an error if:
+    - The number of required balances exceeds the maximum number of inputs allowed.
+    - The fee address index is out of bounds.
+    - The same asset has multiple change policies(either the receiver of
+        the change is different, or one of the policies states about the destruction
+        of the token while the other does not). The `Change` output from the transaction
+        also count as a `ChangePolicy`.
+    - The number of excluded coin IDs exceeds the maximum number of inputs allowed.
+    - Required assets have multiple entries.
+    - If accounts don't have sufficient amounts to cover the transaction requirements in assets.
+    - If a constructed transaction breaks the rules defined by consensus parameters.
+- [2780](https://github.com/FuelLabs/fuel-core/pull/2780): Add implementations for the pre-confirmation signing task
+- [2784](https://github.com/FuelLabs/fuel-core/pull/2784): Integrate the pre conf signature task into the main consensus task
+- [2788](https://github.com/FuelLabs/fuel-core/pull/2788): Scaffold dedicated compression service.
+- [2799](https://github.com/FuelLabs/fuel-core/pull/2799): Add a transaction waiter to the executor to wait for potential new transactions inside the block production window.
+  Add a channel to send preconfirmation created by executor to the other modules
+  Added a new CLI arguments:
+  - `--production-timeout` to control the block production timeout in the case if block producer stuck.
+  - `--poa-open-period` set the block production mode to `Open`. The `Open` mode starts the production of the next block immediately after the previous block. The block is open until the `period` passed. The period is a duration represented by `100ms`, `1s`, `1m`, etc. The manual block production is disabled if this production mode is used.
+- [2802](https://github.com/FuelLabs/fuel-core/pull/2802): Add a new cache with outputs extracted from the pool for the duration of the block.
+- [2824](https://github.com/FuelLabs/fuel-core/pull/2824): Introduce new `Try`-like methods for the `TaskNextAction`
+- [2840](https://github.com/FuelLabs/fuel-core/pull/2840): Added a new CLI arguments:
+  - `assemble-tx-dry-run-limit` - The max number how many times script can be executed during `assemble_tx` GraphQL request. Default value is `3` times.
+  - `assemble-tx-estimate-predicates-limit` - The max number how many times predicates can be estimated during `assemble_tx` GraphQL request. Default values is `10` times.
+- [2841](https://github.com/FuelLabs/fuel-core/pull/2841): Following endpoints allow estimation of predicates on submission of the transaction via new `estimatePredicates` argument:
+  - `submit`
+  - `submit_and_await`
+  - `submit_and_await_status`
+  
+  The change is backward compatible with all SDKs. The change is not forward-compatible with Rust SDK in the case of the `estimate_predicates` flag set.
+- [2844](https://github.com/FuelLabs/fuel-core/pull/2844): Implement DA compression in `fuel-core-compression-service`.
+- [2845](https://github.com/FuelLabs/fuel-core/pull/2845): New status to manage the pre confirmation status send in `TxUpdateSender`.
+- [2855](https://github.com/FuelLabs/fuel-core/pull/2855): Add an expiration interval check for pending pool and refactor extracted_outputs to not rely on block creation/process sequence.
+- [2856](https://github.com/FuelLabs/fuel-core/pull/2856): Add generic logic for managing the signatures and delegate keys for pre-confirmations signatures
+- [2862](https://github.com/FuelLabs/fuel-core/pull/2862): Derive `enum_iterator::Sequence` and `strum_macros::{EnumCount, IntoStaticStr}` for MerkleizedColumn.
+
+### Changed
+- [2388](https://github.com/FuelLabs/fuel-core/pull/2388): Rework the P2P service codecs to avoid unnecessary coupling between components. The refactoring makes it explicit that the Gossipsub and RequestResponse codecs only share encoding/decoding functionalities from the Postcard codec. It also makes handling Gossipsub and RequestResponse messages completely independent of each other.
+- [2460](https://github.com/FuelLabs/fuel-core/pull/2460): The type of the `max_response_size`for the postcard codec used in `RequestResponse` protocols has been changed from `usize` to `u64`.
+- [2473](https://github.com/FuelLabs/fuel-core/pull/2473): Graphql requests and responses make use of a new `extensions` object to specify request/response metadata. A request `extensions` object can contain an integer-valued `required_fuel_block_height` field. When specified, the request will return an error unless the node's current fuel block height is at least the value specified in the `required_fuel_block_height` field. All graphql responses now contain an integer-valued `current_fuel_block_height` field in the `extensions` object, which contains the block height of the last block processed by the node.
+- [2618](https://github.com/FuelLabs/fuel-core/pull/2618): Parallelize block/transaction changes creation in Importer
+- [2653](https://github.com/FuelLabs/fuel-core/pull/2653): Added cleaner error for wasm-executor upon failed deserialization.
+- [2656](https://github.com/FuelLabs/fuel-core/pull/2656): Migrate test helper function `create_contract` to `fuel_core_types::test_helpers::create_contract`, and refactor test in proof_system/global_merkle_root crate to use this function.
+- [2659](https://github.com/FuelLabs/fuel-core/pull/2659): Replace `derivative` crate with `educe` crate.
+- [2705](https://github.com/FuelLabs/fuel-core/pull/2705): Update the default value for `--max-block-size` and `--max-transmit-size` to 50 MB
+- [2715](https://github.com/FuelLabs/fuel-core/pull/2715): Each GraphQL response contains `current_consensus_parameters_version` and `current_stf_version` in the `extensions` section.
+- [2723](https://github.com/FuelLabs/fuel-core/pull/2723): Change the way we are building the changelog to avoids conflicts.
+- [2725](https://github.com/FuelLabs/fuel-core/pull/2725): New txpool worker to remove lock contention
+- [2752](https://github.com/FuelLabs/fuel-core/pull/2752): Extended the `TransactionStatus` to support pre-confirmations.
+- [2761](https://github.com/FuelLabs/fuel-core/pull/2761): Renamed `ConsensusParametersProvider` to `ChainStateInfoProvider` because it is now providing more than just info about consensus parameters.
+- [2767](https://github.com/FuelLabs/fuel-core/pull/2767): Updated fuel-vm to v0.60.0, see [release notes](https://github.com/FuelLabs/fuel-vm/releases/tag/v0.60.0).
+- [2781](https://github.com/FuelLabs/fuel-core/pull/2781): Deprecate `dryRun` mutation. Use `dryRun` query instead.
+- [2791](https://github.com/FuelLabs/fuel-core/pull/2791): Added `TxStatusManager` service which serves as a single source of truth regarding the current statuses of transactions
+- [2793](https://github.com/FuelLabs/fuel-core/pull/2793): Moved common merkle storage trait implementations to `fuel-core-storage` and made it easier to setup a set of columns that need merkleization.
+- [2799](https://github.com/FuelLabs/fuel-core/pull/2799): Change the block production to not be trigger after an interval but directly after the creation of last block and let the executor run for the block time window.
+- [2800](https://github.com/FuelLabs/fuel-core/pull/2800): Implement P2P adapter for preconfirmation broadcasting
+- [2802](https://github.com/FuelLabs/fuel-core/pull/2802): Change new txs notifier to be notified only on executable transactions
+- [2811](https://github.com/FuelLabs/fuel-core/pull/2811): When the state rewind window of 7d was triggered, the `is_migration_in_progress` was repeatedly called, resulting in multiple iterations over the empty ModificationsHistoryV1 table. Iteration was slow because compaction didn't have a chance to clean up V1 table. We removed iteration from the migration process.
+- [2824](https://github.com/FuelLabs/fuel-core/pull/2824): Improve conditions where `Error`s in the `PreConfirmationSignatureTask` stop the service
+- [2840](https://github.com/FuelLabs/fuel-core/pull/2840): Removed `log_backtrace` logic from the executor. It is not needed anymore with the existence of the local debugger for the transactions.
+- [2865](https://github.com/FuelLabs/fuel-core/pull/2865): Consider the following transaction statuses as final: `Success`, `Failure`, `SqueezedOut`, `PreConfirmationSqueezedOut`. All other statuses will be considered transient.
+
+### Fixed
+- [2646](https://github.com/FuelLabs/fuel-core/pull/2646): Improved performance of fetching block height by caching it when the view is created.
+- [2682](https://github.com/FuelLabs/fuel-core/pull/2682): Fixed the issue with RPC consistency feature for the subscriptions(without the fix first we perform the logic of the query, and only after verify the required height).
+- [2730](https://github.com/FuelLabs/fuel-core/pull/2730): Fixed RocksDB closing issue that potentially could panic.
+- [2743](https://github.com/FuelLabs/fuel-core/pull/2743): Allow discovery of the peers when slots for functional connections are consumed. Reserved nodes are not affected by the limitation on connections anymore.
+- [2746](https://github.com/FuelLabs/fuel-core/pull/2746): Fixed flaky part in the e2e tests and version compatibility tests. Speed up compatibility tests execution time. Decreased the default time between block height propagation throw the network.
+- [2758](https://github.com/FuelLabs/fuel-core/pull/2758): Made `tx_id_commitment` feature flagged in `fuel-core-client`.
+- [2832](https://github.com/FuelLabs/fuel-core/pull/2832): - Trigger block production only when all other sub services are started.
+  - Fix relayer syncing issue causing block production to slow down occasionally.
+- [2840](https://github.com/FuelLabs/fuel-core/pull/2840): Fixed `fuel-core-client` receipt deserialization in the case if the `ContractId` is zero.
+
+### Removed
+- [2863](https://github.com/FuelLabs/fuel-core/pull/2863): Removed everything related to the state root service, as it has been moved to another repo.
+
+## [Version 0.41.10]
+
+### Fixed 
+
+- [2963](https://github.com/FuelLabs/fuel-core/pull/2963): Ensure that vm heap memory is zeroed out on rellocation after `reset`. Bumps `fuel-vm` to `0.59.3`.
+
 ## [Version 0.41.9]
 
 ### Fixed

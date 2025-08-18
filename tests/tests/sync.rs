@@ -6,13 +6,13 @@ use fuel_core_types::{
     fuel_tx::Input,
 };
 use rand::{
-    rngs::StdRng,
     SeedableRng,
+    rngs::StdRng,
 };
 use std::{
     collections::{
-        hash_map::DefaultHasher,
         HashMap,
+        hash_map::DefaultHasher,
     },
     hash::{
         Hash,
@@ -294,7 +294,7 @@ async fn test_multiple_producers_different_keys() {
     for (expected, mut validators) in expected.iter().zip(groups) {
         assert_eq!(group_size, validators.len());
         for v in &mut validators {
-            v.consistency_20s(expected).await;
+            v.consistency_30s(expected).await;
         }
     }
 }
@@ -316,9 +316,9 @@ async fn test_multiple_producers_same_key() {
         mut validators,
         bootstrap_nodes: _dont_drop,
     } = make_nodes(
-        std::iter::repeat(Some(BootstrapSetup::new(pub_key))).take(num_producers),
-        std::iter::repeat(Some(ProducerSetup::new(secret))).take(num_producers),
-        std::iter::repeat(Some(ValidatorSetup::new(pub_key))).take(num_validators),
+        std::iter::repeat_n(Some(BootstrapSetup::new(pub_key)), num_producers),
+        std::iter::repeat_n(Some(ProducerSetup::new(secret)), num_producers),
+        std::iter::repeat_n(Some(ValidatorSetup::new(pub_key)), num_validators),
         None,
     )
     .await;

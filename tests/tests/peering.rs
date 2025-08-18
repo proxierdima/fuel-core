@@ -1,13 +1,13 @@
 #![allow(non_snake_case)]
 
 use fuel_core::p2p_test_helpers::{
-    make_nodes,
     BootstrapSetup,
     BootstrapType,
     CustomizeConfig,
     Nodes,
     ProducerSetup,
     ValidatorSetup,
+    make_nodes,
 };
 use fuel_core_client::client::FuelClient;
 use fuel_core_types::{
@@ -15,8 +15,8 @@ use fuel_core_types::{
     fuel_tx::Input,
 };
 use rand::{
-    prelude::StdRng,
     SeedableRng,
+    prelude::StdRng,
 };
 use std::time::Duration;
 
@@ -57,9 +57,9 @@ async fn max_discovery_peers_connected__node_will_not_discover_new_nodes_if_full
     assert!(actual <= expected);
 }
 
-#[tokio::test]
-async fn max_functional_peers_connected__nodes_will_discover_new_peers_if_first_peer_is_full(
-) {
+#[tokio::test(flavor = "multi_thread")]
+async fn max_functional_peers_connected__nodes_will_discover_new_peers_if_first_peer_is_full()
+ {
     let mut rng = StdRng::seed_from_u64(1234);
 
     // given
@@ -87,7 +87,7 @@ async fn max_functional_peers_connected__nodes_will_discover_new_peers_if_first_
         None,
     )
     .await;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
     // then
     let Nodes {
@@ -98,7 +98,7 @@ async fn max_functional_peers_connected__nodes_will_discover_new_peers_if_first_
     let producer = producers.pop().unwrap();
     let client = FuelClient::from(producer.node.bound_address);
     client.produce_blocks(new_blocks, None).await.unwrap();
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_secs(20)).await;
 
     for validator in validators {
         let client = FuelClient::from(validator.node.bound_address);

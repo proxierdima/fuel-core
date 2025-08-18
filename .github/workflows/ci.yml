@@ -22,9 +22,9 @@ env:
   AWS_ROLE_ARN: arn:aws:iam::024848458133:role/github_oidc_FuelLabs_fuel-core
   AWS_ECR_ORG: fuellabs
   CARGO_TERM_COLOR: always
-  RUST_VERSION: 1.81.0
-  RUST_VERSION_FMT: nightly-2023-10-29
-  RUST_VERSION_COV: nightly-2024-06-05
+  RUST_VERSION: 1.86.0
+  RUST_VERSION_FMT: nightly-2025-03-08
+  RUST_VERSION_COV: nightly-2025-03-08
   RUSTFLAGS: -D warnings
   REGISTRY: ghcr.io
   SEGMENT_DOWNLOAD_TIMEOUT_MINS: 2
@@ -39,9 +39,8 @@ jobs:
 
       - name: Check for a file with the PR number in a sub-directory of the .changes directory" or "no changelog" label.
         run: |
-          # Check if we are on master
-          if [ "$GITHUB_REF" = "refs/heads/master" ]; then
-            echo "On master branch, skipping changelog check."
+          if [[ "${{ github.event_name }}" != "pull_request" ]]; then
+            echo "Not a pull request."
             exit 0
           fi
           pr_number_file=$(echo $GITHUB_REF | cut -d'/' -f3).md
@@ -77,25 +76,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ env.RUST_VERSION }}
-      - name: setup binstall
-        uses: taiki-e/install-action@cargo-binstall
       - name: Install Cargo.toml linter
-        run: cargo binstall --no-confirm cargo-sort
+        run: cargo install cargo-sort
       - name: Run Cargo.toml sort check
         run: cargo sort -w --check
-      - name: Install Prettier and TOML Plugin
-        run: |
-          # prettier has issues with global installation and plugin discovery. The temporary `package.json` created by `npm init -y` is a workaround.
-          npm init -y > /dev/null 2>&1
-          npm install prettier prettier-plugin-toml
-      - name: Check format of Cargo.toml files
-        run: |
-          if ! npx prettier --check "**/Cargo.toml"; then
-            npx prettier --write "**/Cargo.toml" > /dev/null 2>&1
-            echo "Changes required:"
-            git --no-pager diff
-            exit 1
-          fi
       - uses: FuelLabs/.github/.github/actions/slack-notify-template@master
         if: always() && github.ref == 'refs/heads/master'
         with:
@@ -145,12 +129,13 @@ jobs:
             args: run -p fuel-core --no-default-features
           - command: nextest
             args: run -p fuel-core --lib executor --features wasm-executor
-            env:
-              FUEL_ALWAYS_USE_WASM=true
+            env: FUEL_ALWAYS_USE_WASM=true
           - command: nextest
             args: run -p fuel-core-client --no-default-features
           - command: nextest
             args: run -p fuel-core-chain-config --no-default-features
+          - command: nextest
+            args: run --workspace --features fault-proving --test integration_tests
           # Don't split this command; this is a workaround.
           # We need to run `cargo check` first to fetch the locked dependencies
           # for `fuel-core 0.26.0`(because of the bug with `--offline`
@@ -203,7 +188,7 @@ jobs:
         if: ${{ matrix.command == 'nextest' }}
         with:
           command: install
-          args: cargo-nextest --locked
+          args: cargo-nextest --locked --version 0.9.100 # supported by rust 1.85.0
         continue-on-error: true
       - name: ${{ matrix.command }} ${{ matrix.args }}
         run: ${{ matrix.env }} cargo ${{ matrix.command }} ${{ matrix.args }}
@@ -396,7 +381,7 @@ jobs:
         uses: baptiste0928/cargo-install@v1
         with:
           crate: cross
-          cache-key: '${{ matrix.job.target }}'
+          cache-key: "${{ matrix.job.target }}"
 
       - name: Build fuel-core and fuel-core-keygen
         run: |

@@ -1,22 +1,21 @@
 use crate::{
     database::{
-        database_description::{
-            off_chain::OffChain,
-            IndexationKind,
-        },
         Database,
         OffChainIterableKeyValueView,
         OffChainKeyValueView,
+        database_description::{
+            IndexationKind,
+            off_chain::OffChain,
+        },
     },
     fuel_core_graphql_api::{
         ports::{
-            worker,
             OffChainDatabase,
             OffChainDatabaseAt,
+            worker,
         },
         storage::{
             contracts::ContractsInfo,
-            da_compression::DaCompressedBlocks,
             relayed_transactions::RelayedTransactionStatuses,
             transactions::OwnedTransactionIndexCursor,
         },
@@ -46,24 +45,20 @@ use crate::{
     },
 };
 use fuel_core_storage::{
-    blueprint::BlueprintInspect,
-    codec::Encode,
+    Error as StorageError,
+    Result as StorageResult,
+    StorageAsRef,
     iter::{
         BoxedIter,
         IntoBoxedIter,
         IterDirection,
         IteratorOverTable,
     },
-    kv_store::KeyValueInspect,
     not_found,
-    structured_storage::TableWithBlueprint,
     transactional::{
         IntoTransaction,
         StorageTransaction,
     },
-    Error as StorageError,
-    Result as StorageResult,
-    StorageAsRef,
 };
 use fuel_core_types::{
     blockchain::{
@@ -87,7 +82,7 @@ use fuel_core_types::{
         BlockHeight,
         Nonce,
     },
-    services::txpool,
+    services::transaction_status,
 };
 use std::iter;
 
@@ -97,23 +92,10 @@ impl OffChainDatabase for OffChainIterableKeyValueView {
             .and_then(|height| height.ok_or(not_found!("BlockHeight")))
     }
 
-    fn da_compressed_block(&self, height: &BlockHeight) -> StorageResult<Vec<u8>> {
-        let column = <DaCompressedBlocks as TableWithBlueprint>::column();
-        let encoder =
-            <<DaCompressedBlocks as TableWithBlueprint>::Blueprint as BlueprintInspect<
-                DaCompressedBlocks,
-                Self,
-            >>::KeyCodec::encode(height);
-
-        self.get(encoder.as_ref(), column)?
-            .ok_or_else(|| not_found!(DaCompressedBlocks))
-            .map(|value| value.to_vec())
-    }
-
     fn tx_status(
         &self,
         tx_id: &TxId,
-    ) -> StorageResult<txpool::TransactionExecutionStatus> {
+    ) -> StorageResult<transaction_status::TransactionExecutionStatus> {
         self.get_tx_status(tx_id)
             .transpose()
             .ok_or(not_found!("TransactionId"))?
@@ -126,7 +108,6 @@ impl OffChainDatabase for OffChainIterableKeyValueView {
         direction: IterDirection,
     ) -> BoxedIter<'_, StorageResult<UtxoId>> {
         self.owned_coins_ids(owner, start_coin, Some(direction))
-            .map(|res| res.map_err(StorageError::from))
             .into_boxed()
     }
 
@@ -137,7 +118,6 @@ impl OffChainDatabase for OffChainIterableKeyValueView {
         direction: IterDirection,
     ) -> BoxedIter<'_, StorageResult<Nonce>> {
         self.owned_message_ids(owner, start_message_id, Some(direction))
-            .map(|result| result.map_err(StorageError::from))
             .into_boxed()
     }
 
@@ -152,7 +132,6 @@ impl OffChainDatabase for OffChainIterableKeyValueView {
             tx_idx: tx_pointer.tx_index(),
         });
         self.owned_transactions(owner, start, Some(direction))
-            .map(|result| result.map_err(StorageError::from))
             .into_boxed()
     }
 
@@ -206,8 +185,7 @@ impl OffChainDatabase for OffChainIterableKeyValueView {
     ) -> StorageResult<Option<RelayedTransactionStatus>> {
         let status = self
             .storage_as_ref::<RelayedTransactionStatuses>()
-            .get(&id)
-            .map_err(StorageError::from)?
+            .get(&id)?
             .map(|cow| cow.into_owned());
         Ok(status)
     }
@@ -351,7 +329,7 @@ impl OffChainIterableKeyValueView {
         start: Option<CoinBalancesKey>,
         direction: IterDirection,
         base_asset_id: &'a AssetId,
-    ) -> BoxedIter<'_, Result<(AssetId, u128), StorageError>> {
+    ) -> BoxedIter<'a, Result<(AssetId, u128), StorageError>> {
         self.iter_all_filtered_keys::<CoinBalances, _>(
             Some(owner),
             start.as_ref(),
@@ -382,7 +360,7 @@ impl OffChainIterableKeyValueView {
         owner: &Address,
         base_asset_id: &'a AssetId,
         direction: IterDirection,
-    ) -> BoxedIter<'_, Result<(AssetId, u128), StorageError>> {
+    ) -> BoxedIter<'a, Result<(AssetId, u128), StorageError>> {
         let start = start.map(|asset_id| CoinBalancesKey::new(owner, &asset_id));
         let base_asset_balance = self.base_asset_balance(base_asset_id, owner);
         let non_base_asset_balance =
@@ -397,7 +375,7 @@ impl OffChainIterableKeyValueView {
         owner: &Address,
         base_asset_id: &'a AssetId,
         direction: IterDirection,
-    ) -> BoxedIter<'_, Result<(AssetId, u128), StorageError>> {
+    ) -> BoxedIter<'a, Result<(AssetId, u128), StorageError>> {
         let base_asset_balance = self.base_asset_balance(base_asset_id, owner);
         let non_base_asset_balances =
             self.non_base_asset_balances(owner, None, direction, base_asset_id);

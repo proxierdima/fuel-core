@@ -8,7 +8,11 @@ homepage = { workspace = true }
 keywords = ["blockchain", "cryptocurrencies", "fuel-vm", "vm"]
 license = { workspace = true }
 repository = { workspace = true }
+rust-version = { workspace = true }
 description = "Transaction pool that manages transactions and their dependencies."
+
+[features]
+test-helpers = ["fuel-core-types/test-helpers", "fuel-core-storage/test-helpers"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -19,6 +23,7 @@ fuel-core-services = { workspace = true, features = ["sync-processor"] }
 fuel-core-storage = { workspace = true, features = ["std"] }
 fuel-core-types = { workspace = true, features = ["test-helpers"] }
 futures = { workspace = true }
+lru = "0.13.0"
 num-rational = { workspace = true }
 parking_lot = { workspace = true }
 petgraph = "0.6.5"
@@ -34,9 +39,3 @@ rand = { workspace = true }
 tokio = { workspace = true, features = ["sync", "test-util"] }
 tokio-stream = { workspace = true }
 tracing = { workspace = true }
-
-[features]
-test-helpers = [
-  "fuel-core-types/test-helpers",
-  "fuel-core-storage/test-helpers",
-]

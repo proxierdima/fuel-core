@@ -1,11 +1,11 @@
 #![allow(clippy::arithmetic_side_effects)]
 
 use crate::v1::da_source_service::{
+    DaBlockCosts,
     service::{
         DaBlockCostsSource,
         Result as DaBlockCostsResult,
     },
-    DaBlockCosts,
 };
 use anyhow::anyhow;
 use fuel_core_types::{
@@ -133,7 +133,9 @@ impl BlockCommitterApi for BlockCommitterHttpApi {
         // Specific: http://committer.url/v1/costs?variant=specific&value=19098935&limit=5
         if let Some(url) = &self.url {
             tracing::debug!("getting da costs by l2 block number: {l2_block_number}");
-            let path = format!("/v1/costs?variant=specific&value={l2_block_number}&limit={NUMBER_OF_BUNDLES}");
+            let path = format!(
+                "/v1/costs?variant=specific&value={l2_block_number}&limit={NUMBER_OF_BUNDLES}"
+            );
             let full_path = url.join(&path)?;
             let response = self.client.get(full_path).send().await?;
             let text = response.text().await?;
@@ -305,8 +307,12 @@ pub mod fake_server {
                         // We don't support `limit` yet!!!!
                         "latest" => {
                             let args = values.next().unwrap();
-                            let limit =
-                                args.split('=').last().unwrap().parse::<usize>().unwrap();
+                            let limit = args
+                                .split('=')
+                                .next_back()
+                                .unwrap()
+                                .parse::<usize>()
+                                .unwrap();
                             assert!(limit == 1);
                             let guard = shared_responses.lock().unwrap();
                             let most_recent = guard
@@ -329,12 +335,15 @@ pub mod fake_server {
                         "specific" => {
                             let args = values.next().unwrap();
                             let mut specific_values = args.split('=');
-                            let height =
-                                specific_values.last().unwrap().parse::<u32>().unwrap();
+                            let height = specific_values
+                                .next_back()
+                                .unwrap()
+                                .parse::<u32>()
+                                .unwrap();
                             tracing::info!("Height: {:?}", height);
                             let maybe_limit = values
                                 .next()
-                                .and_then(|x| x.split('=').last())
+                                .and_then(|x| x.split('=').next_back())
                                 .and_then(|x| x.parse::<usize>().ok());
                             tracing::info!("Limit: {:?}", maybe_limit);
                             let guard = shared_responses.lock().unwrap();
@@ -418,8 +427,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_da_block_cost__when_last_value_is_some__then_get_costs_by_l2_block_number_is_called(
-    ) {
+    async fn request_da_block_cost__when_last_value_is_some__then_get_costs_by_l2_block_number_is_called()
+     {
         // given
         let mut da_block_costs = test_da_block_costs();
         let da_block_costs_len = da_block_costs.end_height - da_block_costs.start_height;

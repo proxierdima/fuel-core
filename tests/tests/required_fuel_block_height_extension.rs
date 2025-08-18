@@ -8,11 +8,11 @@ use fuel_core::{
     },
 };
 use fuel_core_client::client::{
+    FuelClient,
     types::primitives::{
         Address,
         AssetId,
     },
-    FuelClient,
 };
 use fuel_core_types::fuel_tx;
 
@@ -171,8 +171,8 @@ async fn request_with_required_block_height_extension_waits_when_within_threshol
     // Issue a request while the precondition on the required fuel block height is not met.
     let request_task = tokio::spawn(async move {
         client.with_required_fuel_block_height(Some(100u32.into()));
-        let result = client.balance(&owner, Some(&asset_id)).await;
-        result
+
+        client.balance(&owner, Some(&asset_id)).await
     });
     // Produce 5 blocks in parallel with the main test, to meet the precondition
     // on required fuel block height.
@@ -190,8 +190,8 @@ async fn request_with_required_block_height_extension_waits_when_within_threshol
 }
 
 #[tokio::test]
-async fn request_with_required_block_height_extension_fails_when_timeout_while_within_threshold(
-) {
+async fn request_with_required_block_height_extension_fails_when_timeout_while_within_threshold()
+ {
     let owner = Address::default();
     let asset_id = AssetId::BASE;
 

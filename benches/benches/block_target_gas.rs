@@ -7,25 +7,25 @@ use block_target_gas_set::{
     other::run_other,
 };
 use criterion::{
+    BenchmarkGroup,
+    Criterion,
     criterion_group,
     criterion_main,
     measurement::WallTime,
-    BenchmarkGroup,
-    Criterion,
 };
 use ed25519_dalek::Signer;
 use ethnum::U256;
 use fuel_core::{
     combined_database::CombinedDatabase,
     database::{
+        Database,
         balances::BalancesInitializer,
         state::StateInitializer,
-        Database,
     },
     service::{
-        config::Trigger,
         Config,
         FuelService,
+        config::Trigger,
     },
     state::{
         historical_rocksdb::StateRewindPolicy,
@@ -45,12 +45,16 @@ use fuel_core_chain_config::{
     StateConfig,
 };
 use fuel_core_storage::{
+    StorageAsMut,
     tables::ContractsRawCode,
     vm_storage::IncreaseStorageKey,
-    StorageAsMut,
 };
 use fuel_core_types::{
     fuel_asm::{
+        GTFArgs,
+        Instruction,
+        RegId,
+        Word,
         op,
         wideint::{
             CompareArgs,
@@ -60,10 +64,6 @@ use fuel_core_types::{
             MathOp,
             MulArgs,
         },
-        GTFArgs,
-        Instruction,
-        RegId,
-        Word,
     },
     fuel_crypto::{
         secp256r1,
@@ -94,6 +94,7 @@ use fuel_core_types::{
     },
     services::executor::TransactionExecutionResult,
 };
+use fuel_types::SubAssetId;
 use rand::SeedableRng;
 use utils::{
     make_u128,
@@ -205,7 +206,7 @@ pub struct SanityBenchmarkRunner<'a> {
     extra_outputs: Vec<Output>,
 }
 
-impl<'a> SanityBenchmarkRunner<'a> {
+impl SanityBenchmarkRunner<'_> {
     pub fn with_extra_inputs(mut self, extra_inputs: Vec<Input>) -> Self {
         self.extra_inputs = extra_inputs;
         self
@@ -332,7 +333,7 @@ fn service_with_many_contracts(
             .unwrap();
 
         let mut storage_key = primitive_types::U256::zero();
-        let mut sub_id = Bytes32::zeroed();
+        let mut sub_id = SubAssetId::zeroed();
         database
             .init_contract_balances(
                 contract_id,
@@ -356,6 +357,7 @@ fn service_with_many_contracts(
         FuelService::from_combined_database(
             CombinedDatabase::new(
                 database,
+                Default::default(),
                 Default::default(),
                 Default::default(),
                 Default::default(),
@@ -396,7 +398,7 @@ fn run_with_service_with_extra_inputs(
                 .script_gas_limit(TARGET_BLOCK_GAS_LIMIT - BASE)
                 .add_unsigned_coin_input(
                     SecretKey::random(rng),
-                    rng.gen(),
+                    rng.r#gen(),
                     u32::MAX as u64,
                     AssetId::BASE,
                     Default::default(),

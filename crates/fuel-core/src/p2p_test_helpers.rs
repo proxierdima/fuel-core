@@ -2,17 +2,16 @@
 
 use crate::{
     chain_config::{
-        coin_config_helpers::CoinConfigGenerator,
         CoinConfig,
+        coin_config_helpers::CoinConfigGenerator,
     },
     combined_database::CombinedDatabase,
     database::{
-        database_description::off_chain::OffChain,
         Database,
+        database_description::off_chain::OffChain,
     },
     fuel_core_graphql_api::storage::transactions::TransactionStatuses,
     p2p::Multiaddr,
-    schema::tx::types::TransactionStatus,
     service::{
         Config,
         FuelService,
@@ -36,17 +35,17 @@ use fuel_core_p2p::{
     service::to_message_acceptance,
 };
 use fuel_core_poa::{
-    ports::BlockImporter,
     Trigger,
+    ports::BlockImporter,
 };
 use fuel_core_storage::{
-    transactional::AtomicView,
     StorageAsRef,
+    transactional::AtomicView,
 };
 use fuel_core_types::{
     fuel_asm::{
-        op,
         RegId,
+        op,
     },
     fuel_crypto::SecretKey,
     fuel_tx::{
@@ -67,8 +66,8 @@ use fuel_core_types::{
 };
 use futures::StreamExt;
 use rand::{
-    rngs::StdRng,
     SeedableRng,
+    rngs::StdRng,
 };
 use std::{
     collections::HashMap,
@@ -250,6 +249,7 @@ impl Bootstrap {
 }
 
 // set of nodes with the given setups.
+#[allow(clippy::arithmetic_side_effects)]
 pub async fn make_nodes(
     bootstrap_setup: impl IntoIterator<Item = Option<BootstrapSetup>>,
     producers_setup: impl IntoIterator<Item = Option<ProducerSetup>>,
@@ -268,12 +268,12 @@ pub async fn make_nodes(
             let all: Vec<_> = (0..num_test_txs)
                 .map(|_| {
                     let secret = SecretKey::random(&mut rng);
-                    let initial_coin = CoinConfig {
-                        // set idx to prevent overlapping utxo_ids when
-                        // merging with existing coins from config
-                        output_index: 10,
+                    let mut initial_coin = CoinConfig {
                         ..coin_generator.generate_with(secret, 10000)
                     };
+                    // Shift idx to prevent overlapping utxo_ids when
+                    // merging with existing coins from config
+                    initial_coin.output_index += 100;
                     let tx = TransactionBuilder::script(
                         vec![op::ret(RegId::ONE)].into_iter().collect(),
                         vec![],
@@ -364,7 +364,6 @@ pub async fn make_nodes(
         );
 
         let mut test_txs = Vec::with_capacity(0);
-        node_config.block_production = Trigger::Instant;
 
         if let Some((
             ProducerSetup {
@@ -396,9 +395,16 @@ pub async fn make_nodes(
             }
 
             node_config.utxo_validation = utxo_validation;
+            node_config.txpool.utxo_validation = utxo_validation;
             update_signing_key(&mut node_config, Input::owner(&secret.public_key()));
 
             node_config.consensus_signer = SignMode::Key(Secret::new(secret.into()));
+
+            if !txs.is_empty() {
+                node_config
+                    .pre_confirmation_signature_service
+                    .echo_delegation_interval = Duration::from_millis(200);
+            }
 
             test_txs = txs;
         }
@@ -422,6 +428,7 @@ pub async fn make_nodes(
             overrides,
         );
         node_config.block_production = Trigger::Never;
+        node_config.consensus_signer = SignMode::Unavailable;
 
         if let Some(ValidatorSetup {
             pub_key,
@@ -505,7 +512,14 @@ pub fn make_config(
 }
 
 pub async fn make_node(node_config: Config, test_txs: Vec<Transaction>) -> Node {
+    #[cfg(feature = "default")]
+    let db = CombinedDatabase::from_config(&node_config.combined_db_config)
+        .unwrap()
+        .on_chain()
+        .clone();
+    #[cfg(not(feature = "default"))]
     let db = Database::in_memory();
+
     // Test coverage slows down the execution a lot, and while running all tests,
     // it may require a lot of time to start the node. We have a
     // timeout here to watch infinity loops, so it is okay to use 120 seconds.
@@ -571,51 +585,55 @@ impl Node {
     /// Wait for the node to reach consistency with the given transactions.
     pub async fn consistency(&mut self, txs: &HashMap<Bytes32, Transaction>) {
         let db = self.node.shared.database.off_chain();
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(100));
+
+        // first tick completes immediately
+        interval.tick().await;
+
         loop {
-            let not_found = not_found_txs(db, txs);
+            tokio::select! {
+                _ = interval.tick() => {
+                    let not_found = not_found_txs(db, txs);
 
-            if not_found.is_empty() {
-                break;
-            }
-
-            let tx_id = not_found[0];
-            let mut wait_transaction =
-                self.node.transaction_status_change(tx_id).await.unwrap();
-
-            loop {
-                tokio::select! {
-                    result = wait_transaction.next() => {
-                        let status = result.unwrap().unwrap();
-
-                        if matches!(status, TransactionStatus::Failure { .. })
-                            || matches!(status, TransactionStatus::Success { .. }) {
-                            break
-                        }
+                    if not_found.is_empty() {
+                        break;
                     }
-                    _ = self.node.await_shutdown() => {
-                        panic!("Got a stop signal")
-                    }
+                }
+                _ = self.node.await_shutdown() => {
+                    panic!("Got a stop signal")
                 }
             }
         }
     }
 
-    /// Wait for the node to reach consistency with the given transactions within 10 seconds.
-    pub async fn consistency_10s(&mut self, txs: &HashMap<Bytes32, Transaction>) {
-        tokio::time::timeout(Duration::from_secs(10), self.consistency(txs))
+    pub async fn consistency_with_duration(
+        &mut self,
+        txs: &HashMap<Bytes32, Transaction>,
+        duration: Duration,
+    ) {
+        tokio::time::timeout(duration, self.consistency(txs))
             .await
             .unwrap_or_else(|_| {
                 panic!("Failed to reach consistency for {:?}", self.config.name)
             });
     }
 
+    /// Wait for the node to reach consistency with the given transactions within 10 seconds.
+    pub async fn consistency_10s(&mut self, txs: &HashMap<Bytes32, Transaction>) {
+        self.consistency_with_duration(txs, Duration::from_secs(10))
+            .await;
+    }
+
     /// Wait for the node to reach consistency with the given transactions within 20 seconds.
     pub async fn consistency_20s(&mut self, txs: &HashMap<Bytes32, Transaction>) {
-        tokio::time::timeout(Duration::from_secs(20), self.consistency(txs))
-            .await
-            .unwrap_or_else(|_| {
-                panic!("Failed to reach consistency for {:?}", self.config.name)
-            });
+        self.consistency_with_duration(txs, Duration::from_secs(20))
+            .await;
+    }
+
+    /// Wait for the node to reach consistency with the given transactions within 30 seconds.
+    pub async fn consistency_30s(&mut self, txs: &HashMap<Bytes32, Transaction>) {
+        self.consistency_with_duration(txs, Duration::from_secs(30))
+            .await;
     }
 
     /// Insert the test transactions into the node's transaction pool.

@@ -1,6 +1,5 @@
 use crate::{
     database::Database,
-    fuel_core_graphql_api::ports::worker::BlockAt,
     service::adapters::ExecutorAdapter,
 };
 use fuel_core_importer::ports::Validator;
@@ -8,12 +7,15 @@ use fuel_core_storage::{
     not_found,
     transactional::AtomicView,
 };
-use fuel_core_types::services::{
-    block_importer::{
-        ImportResult,
-        SharedImportResult,
+use fuel_core_types::{
+    fuel_types::BlockHeight,
+    services::{
+        block_importer::{
+            ImportResult,
+            SharedImportResult,
+        },
+        executor::ValidationResult,
     },
-    executor::ValidationResult,
 };
 use std::sync::Arc;
 
@@ -30,6 +32,15 @@ impl ImportResultProvider {
             executor_adapter,
         }
     }
+}
+
+/// Represents either the Genesis Block or a block at a specific height
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum BlockAt {
+    /// Block at a specific height
+    Specific(BlockHeight),
+    /// Genesis block
+    Genesis,
 }
 
 impl ImportResultProvider {
@@ -51,7 +62,7 @@ impl ImportResultProvider {
                     .into_result();
                 let result =
                     ImportResult::new_from_local(sealed_block, tx_status, events);
-                Ok(Arc::new(result))
+                Ok(Arc::new(result.wrap()))
             }
             BlockAt::Genesis => {
                 let genesis_height = self
@@ -65,11 +76,9 @@ impl ImportResultProvider {
                     .get_sealed_block_by_height(&genesis_height)?
                     .ok_or(not_found!("SealedBlock"))?;
 
-                Ok(Arc::new(ImportResult::new_from_local(
-                    sealed_block,
-                    vec![],
-                    vec![],
-                )))
+                Ok(Arc::new(
+                    ImportResult::new_from_local(sealed_block, vec![], vec![]).wrap(),
+                ))
             }
         }
     }

@@ -22,16 +22,16 @@ use crate::{
         ValidityError,
     },
     fuel_types::{
-        fmt_option_truncated_hex,
-        fmt_truncated_hex,
         BlockHeight,
         Bytes32,
         ContractId,
         Nonce,
+        fmt_option_truncated_hex,
+        fmt_truncated_hex,
     },
     fuel_vm::{
-        checked_transaction::CheckError,
         ProgramState,
+        checked_transaction::CheckError,
     },
     services::Uncommitted,
 };
@@ -41,6 +41,7 @@ use alloc::{
     string::String,
     vec::Vec,
 };
+use fuel_vm_private::prelude::Transaction;
 
 /// The alias for executor result.
 pub type Result<T> = core::result::Result<T, Error>;
@@ -242,9 +243,10 @@ impl TransactionExecutionResult {
         }
     }
 
-    #[cfg(feature = "std")]
     /// Get the reason of the failed transaction execution.
     pub fn reason(receipts: &[Receipt], state: &Option<ProgramState>) -> String {
+        use alloc::format;
+
         receipts
             .iter()
             .find_map(|receipt| match receipt {
@@ -271,6 +273,15 @@ pub struct StorageReadReplayEvent {
     /// Value at the column:key pair. None if the key was not found.
     #[educe(Debug(method("fmt_option_truncated_hex::<16>")))]
     pub value: Option<Vec<u8>>,
+}
+
+/// The result of a dry run.
+#[derive(Debug, Clone)]
+pub struct DryRunResult {
+    /// Transactions that were executed, and their execution status.
+    pub transactions: Vec<(Transaction, TransactionExecutionStatus)>,
+    /// Storage read events, only populated if it was requested.
+    pub storage_reads: Vec<StorageReadReplayEvent>,
 }
 
 #[allow(missing_docs)]

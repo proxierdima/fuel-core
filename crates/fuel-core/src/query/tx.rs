@@ -1,10 +1,10 @@
 use crate::fuel_core_graphql_api::database::ReadView;
 use fuel_core_storage::{
+    Error as StorageError,
+    Result as StorageResult,
     iter::IterDirection,
     not_found,
     tables::Transactions,
-    Error as StorageError,
-    Result as StorageResult,
 };
 use fuel_core_types::{
     fuel_tx::{
@@ -14,7 +14,7 @@ use fuel_core_types::{
         TxPointer,
     },
     fuel_types::Address,
-    services::txpool::TransactionExecutionStatus,
+    services::transaction_status::TransactionExecutionStatus,
 };
 use futures::{
     Stream,

@@ -1,3 +1,4 @@
+use clap::Parser;
 use ethers::{
     providers::Middleware,
     types::{
@@ -7,6 +8,11 @@ use ethers::{
     },
 };
 use fuel_core::{
+    chain_config::Randomize,
+    coins_query::CoinsQueryError::{
+        self,
+        InsufficientCoins,
+    },
     combined_database::CombinedDatabase,
     database::Database,
     fuel_core_graphql_api::storage::relayed_transactions::RelayedTransactionStatuses,
@@ -15,9 +21,16 @@ use fuel_core::{
         Config,
         FuelService,
     },
-    state::rocks_db::DatabaseConfig,
+    state::{
+        historical_rocksdb::StateRewindPolicy,
+        rocks_db::{
+            ColumnsPolicy,
+            DatabaseConfig,
+        },
+    },
 };
 use fuel_core_client::client::{
+    FuelClient,
     pagination::{
         PageDirection,
         PaginationRequest,
@@ -27,18 +40,20 @@ use fuel_core_client::client::{
         RelayedTransactionStatus as ClientRelayedTransactionStatus,
         TransactionStatus,
     },
-    FuelClient,
 };
 use fuel_core_poa::service::Mode;
-use fuel_core_relayer::test_helpers::{
-    middleware::MockMiddleware,
-    EvtToLog,
-    LogTestHelper,
+use fuel_core_relayer::{
+    ports::Transactional,
+    test_helpers::{
+        EvtToLog,
+        LogTestHelper,
+        middleware::MockMiddleware,
+    },
 };
 use fuel_core_storage::{
-    tables::Messages,
     StorageAsMut,
     StorageAsRef,
+    tables::Messages,
 };
 use fuel_core_types::{
     entities::relayer::transaction::RelayedTransactionStatus as FuelRelayedTransactionStatus,
@@ -52,18 +67,19 @@ use fuel_core_types::{
 };
 use fuel_types::Bytes20;
 use hyper::{
-    service::{
-        make_service_fn,
-        service_fn,
-    },
     Body,
     Request,
     Response,
     Server,
+    service::{
+        make_service_fn,
+        service_fn,
+    },
 };
 use rand::{
-    prelude::StdRng,
+    Rng,
     SeedableRng,
+    prelude::StdRng,
 };
 use serde_json::json;
 use std::{
@@ -75,12 +91,15 @@ use std::{
     sync::Arc,
     time::Duration,
 };
+use tempfile::TempDir;
 use test_helpers::{
     assemble_tx::{
         AssembleAndRunTx,
         SigningAccount,
     },
     config_with_fee,
+    default_signing_wallet,
+    fuel_core_driver::FuelCoreDriver,
 };
 use tokio::sync::oneshot::Sender;
 
@@ -118,10 +137,12 @@ async fn relayer_can_download_logs() {
     let eth_node = Arc::new(eth_node);
     let eth_node_handle = spawn_eth_node(eth_node).await;
 
-    relayer_config.relayer = Some(vec![format!("http://{}", eth_node_handle.address)
-        .as_str()
-        .try_into()
-        .unwrap()]);
+    relayer_config.relayer = Some(vec![
+        format!("http://{}", eth_node_handle.address)
+            .as_str()
+            .try_into()
+            .unwrap(),
+    ]);
     let db = Database::in_memory();
 
     let srv = FuelService::from_database(db.clone(), config)
@@ -186,10 +207,12 @@ async fn messages_are_spendable_after_relayer_is_synced() {
     let eth_node = Arc::new(eth_node);
     let eth_node_handle = spawn_eth_node(eth_node).await;
 
-    relayer_config.relayer = Some(vec![format!("http://{}", eth_node_handle.address)
-        .as_str()
-        .try_into()
-        .unwrap()]);
+    relayer_config.relayer = Some(vec![
+        format!("http://{}", eth_node_handle.address)
+            .as_str()
+            .try_into()
+            .unwrap(),
+    ]);
 
     // setup fuel node with mocked eth url
     let db = Database::in_memory();
@@ -287,7 +310,7 @@ async fn can_find_failed_relayed_tx() {
 #[tokio::test(flavor = "multi_thread")]
 async fn can_restart_node_with_relayer_data() {
     let mut rng = StdRng::seed_from_u64(1234);
-    let mut config = Config::local_node();
+    let mut config = config_with_fee();
     config.relayer = Some(relayer::Config::default());
     let relayer_config = config.relayer.as_mut().expect("Expected relayer config");
     let eth_node = MockMiddleware::default();
@@ -317,10 +340,12 @@ async fn can_restart_node_with_relayer_data() {
     let eth_node = Arc::new(eth_node);
     let eth_node_handle = spawn_eth_node(eth_node).await;
 
-    relayer_config.relayer = Some(vec![format!("http://{}", eth_node_handle.address)
-        .as_str()
-        .try_into()
-        .unwrap()]);
+    relayer_config.relayer = Some(vec![
+        format!("http://{}", eth_node_handle.address)
+            .as_str()
+            .try_into()
+            .unwrap(),
+    ]);
 
     let tmp_dir = tempfile::TempDir::new().unwrap();
 
@@ -340,8 +365,10 @@ async fn can_restart_node_with_relayer_data() {
         client.health().await.unwrap();
 
         for _ in 0..5 {
-            let tx = Transaction::default_test_tx();
-            client.submit_and_await_commit(&tx).await.unwrap();
+            client
+                .run_script(vec![op::ret(1)], vec![], default_signing_wallet())
+                .await
+                .unwrap();
         }
 
         service.send_stop_signal_and_await_shutdown().await.unwrap();
@@ -459,7 +486,7 @@ async fn handle(
                 }
                 SyncingStatus::IsSyncing(status) => {
                     json!({ "id": id, "jsonrpc": "2.0", "result": {
-                        "starting_block": status.starting_block, 
+                        "starting_block": status.starting_block,
                         "current_block": status.current_block,
                         "highest_block": status.highest_block,
                     } })
@@ -478,6 +505,16 @@ async fn handle(
     let r = serde_json::to_vec(&r).unwrap();
 
     Ok(Response::new(Body::from(r)))
+}
+
+trait ToStdErrorString {
+    fn to_str_error_string(self) -> String;
+}
+impl ToStdErrorString for CoinsQueryError {
+    fn to_str_error_string(self) -> String {
+        fuel_core_client::client::from_strings_errors_to_std_error(vec![self.to_string()])
+            .to_string()
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -523,10 +560,12 @@ async fn balances_and_coins_to_spend_never_return_retryable_messages() {
     let eth_node = Arc::new(eth_node);
     let eth_node_handle = spawn_eth_node(eth_node).await;
 
-    relayer_config.relayer = Some(vec![format!("http://{}", eth_node_handle.address)
-        .as_str()
-        .try_into()
-        .unwrap()]);
+    relayer_config.relayer = Some(vec![
+        format!("http://{}", eth_node_handle.address)
+            .as_str()
+            .try_into()
+            .unwrap(),
+    ]);
 
     config.utxo_validation = true;
 
@@ -610,7 +649,7 @@ async fn balances_and_coins_to_spend_never_return_retryable_messages() {
         .balance(&recipient, Some(&base_asset_id))
         .await
         .unwrap();
-    assert_eq!(query, NON_RETRYABLE_AMOUNT);
+    assert_eq!(query, NON_RETRYABLE_AMOUNT as u128);
 
     // Expect only the non-retryable message balance to be returned via "balances"
     let query = client
@@ -669,11 +708,122 @@ async fn balances_and_coins_to_spend_never_return_retryable_messages() {
         .unwrap_err();
     assert_eq!(
         query.to_string(),
-        "Response errors; the target cannot be met due to no coins available or exceeding the 255 coin limit."
+        InsufficientCoins {
+            owner: recipient,
+            asset_id: base_asset_id,
+            collected_amount: 100,
+        }
+        .to_str_error_string()
     );
 
     srv.send_stop_signal_and_await_shutdown().await.unwrap();
     eth_node_handle.shutdown.send(()).unwrap();
+}
+
+#[tokio::test]
+async fn relayer_db_can_be_rewinded() {
+    // Given
+    let rollback_target_height = 0;
+    let num_da_blocks = 10;
+    let mut rng = StdRng::seed_from_u64(1234);
+    let mut config = config_with_fee();
+    config.relayer = Some(relayer::Config::default());
+    let relayer_config = config.relayer.as_mut().expect("Expected relayer config");
+    let eth_node = MockMiddleware::default();
+    let contract_address = relayer_config.eth_v2_listening_contracts[0];
+
+    let logs: Vec<_> = (1..=num_da_blocks)
+        .map(|block_height| {
+            make_message_event(
+                Nonce::randomize(&mut rng),
+                block_height,
+                contract_address,
+                Some(rng.r#gen()),
+                Some(rng.r#gen()),
+                Some(rng.r#gen()),
+                None,
+                0,
+            )
+        })
+        .collect();
+    eth_node.update_data(|data| data.logs_batch = vec![logs.clone()]);
+    eth_node.update_data(|data| data.best_block.number = Some(num_da_blocks.into()));
+
+    let eth_node_handle = spawn_eth_node(Arc::new(eth_node)).await;
+
+    let relayer_url = format!("http://{}", eth_node_handle.address);
+
+    let tmp_dir = TempDir::new().unwrap();
+    let open_db = |tmp_dir: &TempDir| {
+        CombinedDatabase::open(
+            tmp_dir.path(),
+            StateRewindPolicy::RewindFullRange,
+            DatabaseConfig {
+                cache_capacity: Some(16 * 1024 * 1024 * 1024),
+                max_fds: -1,
+                columns_policy: ColumnsPolicy::Lazy,
+            },
+        )
+        .expect("Failed to create database")
+    };
+
+    let driver = FuelCoreDriver::spawn_feeless_with_directory(
+        tmp_dir,
+        &[
+            "--debug",
+            "--poa-instant",
+            "true",
+            "--state-rewind-duration",
+            "7d",
+            "--enable-relayer",
+            "--relayer",
+            &relayer_url,
+        ],
+    )
+    .await
+    .unwrap();
+    let srv = &driver.node;
+
+    let client = FuelClient::from(srv.bound_address);
+
+    srv.await_relayer_synced().await.unwrap();
+    client.produce_blocks(1, None).await.unwrap();
+
+    srv.send_stop_signal_and_await_shutdown().await.unwrap();
+    eth_node_handle.shutdown.send(()).unwrap();
+
+    // When
+    let tmp_dir = driver.kill().await;
+
+    let db = open_db(&tmp_dir);
+    let relayer_block_height_before_rollback = db.relayer().latest_da_height();
+    db.shutdown();
+
+    let target_block_height = rollback_target_height.to_string();
+    let target_da_block_height = rollback_target_height.to_string();
+    let args = [
+        "_IGNORED_",
+        "--db-path",
+        tmp_dir.path().to_str().unwrap(),
+        "--target-block-height",
+        target_block_height.as_str(),
+        "--target-da-block-height",
+        target_da_block_height.as_str(),
+    ];
+
+    let command = fuel_core_bin::cli::rollback::Command::parse_from(args);
+    fuel_core_bin::cli::rollback::exec(command).await.unwrap();
+
+    let db = open_db(&tmp_dir);
+    let relayer_block_height_after_rollback =
+        db.relayer().latest_height_from_metadata().unwrap();
+
+    // Then
+    assert_eq!(
+        relayer_block_height_before_rollback.unwrap().as_u64(),
+        num_da_blocks
+    );
+    assert!(relayer_block_height_after_rollback.is_none());
 }
 
 fn setup_messages(

@@ -5,16 +5,16 @@ use std::{
 
 use crate::{
     coins_query::{
-        random_improve,
-        select_coins_to_spend,
         CoinsQueryError,
         SpendQuery,
+        random_improve,
+        select_coins_to_spend,
     },
     database::database_description::IndexationKind,
     fuel_core_graphql_api::{
+        IntoApiResult,
         query_costs,
         storage::coins::CoinsToSpendIndexKey,
-        IntoApiResult,
     },
     graphql_api::{
         api_service::ChainInfoProvider,
@@ -25,35 +25,35 @@ use crate::{
         Exclude,
     },
     schema::{
+        ReadViewProvider,
         scalars::{
             Address,
             AssetId,
             Nonce,
-            UtxoId,
-            U128,
             U16,
             U32,
             U64,
+            U128,
+            UtxoId,
         },
-        ReadViewProvider,
     },
 };
 use async_graphql::{
+    Context,
     connection::{
         Connection,
         EmptyFields,
     },
-    Context,
 };
 use fuel_core_types::{
     entities::coins::{
         self,
+        CoinId,
         coin::Coin as CoinModel,
         message_coin::{
             self,
             MessageCoin as MessageCoinModel,
         },
-        CoinId,
     },
     fuel_tx::{
         self,
@@ -184,6 +184,8 @@ pub struct SpendQueryElementInput {
     pub amount: U128,
     /// The maximum number of currencies for selection.
     pub max: Option<U16>,
+    /// If true, returns available coins instead of failing when the requested amount is unavailable.
+    pub allow_partial: Option<bool>,
 }
 
 #[derive(async_graphql::InputObject)]
@@ -252,7 +254,7 @@ impl CoinQuery {
                     if let (Ok(coin), Some(filter_asset_id)) = (&result, &filter.asset_id)
                     {
                         if coin.asset_id != filter_asset_id.0 {
-                            return None
+                            return None;
                         }
                     }
 
@@ -379,6 +381,7 @@ async fn coins_to_spend_without_cache(
                 e.asset_id.0,
                 e.amount.0,
                 e.max.map(|max| max.0).unwrap_or(max_input).min(max_input),
+                e.allow_partial.unwrap_or(false),
             )
         })
         .collect_vec();
@@ -418,22 +421,24 @@ async fn coins_to_spend_with_cache(
 ) -> Result<Vec<Vec<CoinType>>, CoinsQueryError> {
     let mut all_coins = Vec::with_capacity(query_per_asset.len());
 
-    for asset in query_per_asset {
-        let asset_id = asset.asset_id.0;
-        let total_amount = asset.amount.0;
-        let max = asset
+    for element in query_per_asset {
+        let asset_id = element.asset_id.0;
+        let target = element.amount.0;
+        let max = element
             .max
             .map(|max| max.0)
             .unwrap_or(max_input)
             .min(max_input);
+        let allow_partial = element.allow_partial.unwrap_or(false);
+
+        let asset_target = AssetSpendTarget::new(asset_id, target, max, allow_partial);
 
         let selected_coins = select_coins_to_spend(
             db.off_chain.coins_to_spend_index(&owner, &asset_id),
-            total_amount,
-            max,
-            &asset_id,
+            asset_target,
             excluded,
             db.batch_size,
+            owner,
         )
         .await?;
 

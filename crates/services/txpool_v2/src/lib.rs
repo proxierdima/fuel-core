@@ -22,13 +22,13 @@
 //! - The transaction has dependencies:
 //!     - Can collide only with one other transaction. So, the user can submit
 //!       the same transaction with a higher tip but not merge one or more
-//!         transactions into one.
+//!       transactions into one.
 //!     - A new transaction can be accepted if its profitability is higher than
-//!         the cumulative profitability of the colliding transactions, and all
-//!         the transactions that depend on it.
+//!       the cumulative profitability of the colliding transactions, and all
+//!       the transactions that depend on it.
 //! - A transaction doesn't have dependencies:
 //!     - A new transaction can be accepted if its profitability is higher
-//!         than the collided subtrees'.
+//!       than the collided subtrees'.
 //!
 //! The pool provides a way to subscribe for updates on a transaction status.
 //! It usually stream one or two messages:
@@ -56,6 +56,7 @@ mod storage;
 
 pub type GasPrice = Word;
 
+mod spent_inputs;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -65,7 +66,7 @@ use fuel_core_types::fuel_asm::Word;
 pub use pool::TxPoolStats;
 pub use selection_algorithms::Constraints;
 pub use service::{
-    new_service,
     Service,
+    new_service,
 };
 pub use shared_state::SharedState;

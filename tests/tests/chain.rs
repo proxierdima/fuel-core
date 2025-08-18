@@ -5,20 +5,20 @@ use fuel_core::{
         StateConfig,
     },
     service::{
-        config::GasPriceConfig,
         Config,
         FuelService,
+        config::GasPriceConfig,
     },
 };
 use fuel_core_client::client::{
+    FuelClient,
     types::{
+        TransactionStatus,
         primitives::{
             AssetId,
             UtxoId,
         },
-        TransactionStatus,
     },
-    FuelClient,
 };
 use fuel_core_types::{
     fuel_crypto::SecretKey,
@@ -65,7 +65,7 @@ async fn network_operates_with_non_zero_chain_id() {
         coins: vec![CoinConfig {
             tx_id: *utxo_id.tx_id(),
             output_index: utxo_id.output_index(),
-            owner,
+            owner: owner.into(),
             amount,
             asset_id: AssetId::BASE,
             ..Default::default()
@@ -113,7 +113,7 @@ async fn network_operates_with_non_zero_base_asset_id() {
         coins: vec![CoinConfig {
             tx_id: *utxo_id.tx_id(),
             output_index: utxo_id.output_index(),
-            owner,
+            owner: owner.into(),
             amount,
             asset_id: new_base_asset_id,
             ..Default::default()
@@ -151,5 +151,5 @@ async fn network_operates_with_non_zero_base_asset_id() {
         .balance(&owner, Some(&new_base_asset_id))
         .await
         .expect("Should fetch the balance");
-    assert_eq!(balance, amount - expected_fee);
+    assert_eq!(balance, amount as u128 - expected_fee);
 }

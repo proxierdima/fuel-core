@@ -9,6 +9,8 @@ use crate::{
     refs::ContractRef,
 };
 use fuel_core_storage::{
+    StorageAsMut,
+    StorageAsRef,
     column::Column,
     kv_store::KeyValueInspect,
     tables::{
@@ -29,8 +31,6 @@ use fuel_core_storage::{
         WriteTransaction,
     },
     vm_storage::VmStorage,
-    StorageAsMut,
-    StorageAsRef,
 };
 use fuel_core_types::{
     blockchain::{
@@ -46,16 +46,36 @@ use fuel_core_types::{
         transaction::TransactionExt,
     },
     entities::{
+        RelayedTransaction,
         coins::coin::{
             CompressedCoin,
             CompressedCoinV1,
         },
         contract::ContractUtxoInfo,
-        RelayedTransaction,
     },
-    fuel_asm::Word,
+    fuel_asm::{
+        PanicInstruction,
+        Word,
+        op,
+    },
     fuel_merkle::binary::root_calculator::MerkleRootCalculator,
     fuel_tx::{
+        Address,
+        AssetId,
+        Bytes32,
+        Cacheable,
+        Chargeable,
+        ConsensusParameters,
+        Input,
+        Mint,
+        Output,
+        PanicReason,
+        Receipt,
+        Transaction,
+        TxId,
+        TxPointer,
+        UniqueIdentifier,
+        UtxoId,
         field::{
             InputContract,
             MaxFeeLimit,
@@ -79,30 +99,17 @@ use fuel_core_types::{
             },
         },
         output,
-        Address,
-        AssetId,
-        Bytes32,
-        Cacheable,
-        Chargeable,
-        ConsensusParameters,
-        Input,
-        Mint,
-        Output,
-        Receipt,
-        Transaction,
-        TxId,
-        TxPointer,
-        UniqueIdentifier,
-        UtxoId,
     },
     fuel_types::{
-        canonical::Deserialize,
         BlockHeight,
         ContractId,
         MessageId,
+        canonical::Deserialize,
     },
     fuel_vm::{
         self,
+        Interpreter,
+        ProgramState,
         checked_transaction::{
             CheckPredicateParams,
             CheckPredicates,
@@ -116,10 +123,10 @@ use fuel_core_types::{
             ExecutableTransaction,
             InterpreterParams,
             MemoryInstance,
+            NotSupportedEcal,
         },
         state::StateTransition,
-        Interpreter,
-        ProgramState,
+        verification,
     },
     services::{
         block_producer::Components,
@@ -136,7 +143,10 @@ use fuel_core_types::{
             UncommittedValidationResult,
             ValidationResult,
         },
-        preconfirmation::PreconfirmationStatus,
+        preconfirmation::{
+            Preconfirmation,
+            PreconfirmationStatus,
+        },
         relayer::Event,
     },
 };
@@ -158,17 +168,6 @@ use alloc::{
     string::ToString,
     vec,
     vec::Vec,
-};
-use fuel_core_types::{
-    fuel_asm::{
-        op,
-        PanicInstruction,
-    },
-    fuel_tx::PanicReason,
-    fuel_vm::{
-        interpreter::NotSupportedEcal,
-        verification,
-    },
 };
 
 /// The maximum amount of transactions that can be included in a block,
@@ -239,33 +238,37 @@ impl NewTxWaiterPort for TimeoutOnlyTxWaiter {
 pub struct TransparentPreconfirmationSender;
 
 impl PreconfirmationSenderPort for TransparentPreconfirmationSender {
-    fn try_send(&self, _: Vec<PreconfirmationStatus>) -> Vec<PreconfirmationStatus> {
+    fn try_send(&self, _: Vec<Preconfirmation>) -> Vec<Preconfirmation> {
         vec![]
     }
 
-    async fn send(&self, _: Vec<PreconfirmationStatus>) {}
+    async fn send(&self, _: Vec<Preconfirmation>) {}
 }
 
-fn convert_tx_execution_result_to_preconfirmation(
+pub fn convert_tx_execution_result_to_preconfirmation(
     tx: &Transaction,
+    tx_id: TxId,
     tx_exec_result: &TransactionExecutionResult,
     block_height: BlockHeight,
     tx_index: u16,
-) -> PreconfirmationStatus {
+) -> Preconfirmation {
     let tx_pointer = TxPointer::new(block_height, tx_index);
     let dynamic_outputs = tx
         .outputs()
         .iter()
-        .filter_map(|output| {
+        .enumerate()
+        .filter_map(|(i, output)| {
             if output.is_change() || output.is_variable() && output.amount() != Some(0) {
-                Some(*output)
+                let output_index = u16::try_from(i).ok()?;
+                let utxo_id = UtxoId::new(tx_id, output_index);
+                Some((utxo_id, *output))
             } else {
                 None
             }
         })
         .collect();
 
-    match tx_exec_result {
+    let status = match tx_exec_result {
         TransactionExecutionResult::Success {
             receipts,
             total_gas,
@@ -290,7 +293,8 @@ fn convert_tx_execution_result_to_preconfirmation(
             receipts: receipts.clone(),
             outputs: dynamic_outputs,
         },
-    }
+    };
+    Preconfirmation { tx_id, status }
 }
 
 /// Data that is generated after executing all transactions.
@@ -327,7 +331,8 @@ impl ExecutionData {
     }
 }
 
-/// Per-block execution options
+/// Per-block execution options.
+/// These are passed to the executor.
 #[derive(serde::Serialize, serde::Deserialize, Clone, Default, Debug)]
 pub struct ExecutionOptions {
     /// The flag allows the usage of fake coins in the inputs of the transaction.
@@ -772,7 +777,7 @@ where
             .into_iter()
             .take(remaining_tx_count as usize)
             .peekable();
-        let mut status = vec![];
+        let mut statuses = vec![];
         while regular_tx_iter.peek().is_some() {
             for transaction in regular_tx_iter {
                 let tx_id = transaction.id(&self.consensus_params.chain_id());
@@ -808,20 +813,24 @@ where
                         let preconfirmation_status =
                             convert_tx_execution_result_to_preconfirmation(
                                 tx,
+                                tx_id,
                                 &latest_executed_tx.result,
                                 *block.header.height(),
                                 data.tx_count,
                             );
-                        status.push(preconfirmation_status);
+                        statuses.push(preconfirmation_status);
                     }
                     Err(err) => {
-                        status.push(PreconfirmationStatus::SqueezedOut {
-                            reason: err.to_string(),
+                        statuses.push(Preconfirmation {
+                            tx_id,
+                            status: PreconfirmationStatus::SqueezedOut {
+                                reason: err.to_string(),
+                            },
                         });
                         data.skipped_transactions.push((tx_id, err));
                     }
                 }
-                status = self.preconfirmation_sender.try_send(status);
+                statuses = self.preconfirmation_sender.try_send(statuses);
                 remaining_gas_limit = block_gas_limit.saturating_sub(data.used_gas);
                 remaining_block_transaction_size_limit =
                     block_transaction_size_limit.saturating_sub(data.used_size);
@@ -838,8 +847,8 @@ where
                 .take(remaining_tx_count as usize)
                 .peekable();
         }
-        if !status.is_empty() {
-            self.preconfirmation_sender.send(status).await;
+        if !statuses.is_empty() {
+            self.preconfirmation_sender.send(statuses).await;
         }
 
         Ok(())
@@ -1744,8 +1753,11 @@ where
                         *predicate_gas_used = gas_used;
                     }
                     _ => {
-                        debug_assert!(false, "This error is not possible unless VM changes the order of inputs, \
-                        or we added a new predicate inputs.");
+                        debug_assert!(
+                            false,
+                            "This error is not possible unless VM changes the order of inputs, \
+                        or we added a new predicate inputs."
+                        );
                         return Err(ExecutorError::InvalidTransactionOutcome {
                             transaction_id: tx_id,
                         })
@@ -1944,16 +1956,21 @@ where
             match input {
                 Input::CoinSigned(CoinSigned { utxo_id, .. })
                 | Input::CoinPredicate(CoinPredicate { utxo_id, .. }) => {
-                    if let Some(coin) = db.storage::<Coins>().get(utxo_id)? {
-                        if !coin.matches_input(input).unwrap_or_default() {
-                            return Err(
-                                TransactionValidityError::CoinMismatch(*utxo_id).into()
-                            )
+                    match db.storage::<Coins>().get(utxo_id)? {
+                        Some(coin) => {
+                            if !coin.matches_input(input).unwrap_or_default() {
+                                return Err(TransactionValidityError::CoinMismatch(
+                                    *utxo_id,
+                                )
+                                .into())
+                            }
                         }
-                    } else {
-                        return Err(
-                            TransactionValidityError::CoinDoesNotExist(*utxo_id).into()
-                        )
+                        _ => {
+                            return Err(TransactionValidityError::CoinDoesNotExist(
+                                *utxo_id,
+                            )
+                            .into())
+                        }
                     }
                 }
                 Input::Contract(contract) => {
@@ -1971,23 +1988,30 @@ where
                 | Input::MessageCoinPredicate(MessageCoinPredicate { nonce, .. })
                 | Input::MessageDataSigned(MessageDataSigned { nonce, .. })
                 | Input::MessageDataPredicate(MessageDataPredicate { nonce, .. }) => {
-                    if let Some(message) = db.storage::<Messages>().get(nonce)? {
-                        if message.da_height() > block_da_height {
-                            return Err(TransactionValidityError::MessageSpendTooEarly(
+                    match db.storage::<Messages>().get(nonce)? {
+                        Some(message) => {
+                            if message.da_height() > block_da_height {
+                                return Err(
+                                    TransactionValidityError::MessageSpendTooEarly(
+                                        *nonce,
+                                    )
+                                    .into(),
+                                )
+                            }
+
+                            if !message.matches_input(input).unwrap_or_default() {
+                                return Err(TransactionValidityError::MessageMismatch(
+                                    *nonce,
+                                )
+                                .into())
+                            }
+                        }
+                        _ => {
+                            return Err(TransactionValidityError::MessageDoesNotExist(
                                 *nonce,
                             )
                             .into())
                         }
-
-                        if !message.matches_input(input).unwrap_or_default() {
-                            return Err(
-                                TransactionValidityError::MessageMismatch(*nonce).into()
-                            )
-                        }
-                    } else {
-                        return Err(
-                            TransactionValidityError::MessageDoesNotExist(*nonce).into()
-                        )
                     }
                 }
             }
@@ -2139,7 +2163,7 @@ where
                         .get_coin_or_default(db, *utxo_id, *owner, *amount, *asset_id)?;
                     *tx_pointer = *coin.tx_pointer();
                 }
-                Input::Contract(input::contract::Contract {
+                &mut Input::Contract(input::contract::Contract {
                     ref mut utxo_id,
                     ref mut balance_root,
                     ref mut state_root,

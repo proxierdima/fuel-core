@@ -6,13 +6,13 @@ use fuel_core_types::{
     },
     fuel_tx::{
         self,
-        field::Expiration,
         ConsensusParameters,
         Input,
         Output,
         Transaction,
         TxId,
         UniqueIdentifier,
+        field::Expiration,
     },
     fuel_types::{
         BlockHeight,
@@ -21,7 +21,7 @@ use fuel_core_types::{
     fuel_vm::checked_transaction::CheckedTransaction,
     services::{
         executor::Result as ExecutorResult,
-        preconfirmation::PreconfirmationStatus,
+        preconfirmation::Preconfirmation,
         relayer::Event,
     },
 };
@@ -41,6 +41,7 @@ use core::future::Future;
 
 /// The wrapper around either `Transaction` or `CheckedTransaction`.
 #[allow(clippy::large_enum_variant)]
+#[derive(Debug)]
 pub enum MaybeCheckedTransaction {
     CheckedTransaction(CheckedTransaction, ConsensusParametersVersion),
     Transaction(fuel_tx::Transaction),
@@ -124,7 +125,7 @@ impl MaybeCheckedTransaction {
 }
 
 impl TransactionExt for MaybeCheckedTransaction {
-    fn inputs(&self) -> ExecutorResult<&Vec<Input>> {
+    fn inputs(&self) -> Cow<[Input]> {
         match self {
             MaybeCheckedTransaction::CheckedTransaction(tx, _) => tx.inputs(),
             MaybeCheckedTransaction::Transaction(tx) => tx.inputs(),
@@ -181,14 +182,11 @@ pub trait NewTxWaiterPort: Send {
 pub trait PreconfirmationSenderPort {
     /// Try to send a batch of pre-confirmations. Will succeed only if
     /// it can be directly sent. Otherwise it will return the batch.
-    fn try_send(
-        &self,
-        preconfirmations: Vec<PreconfirmationStatus>,
-    ) -> Vec<PreconfirmationStatus>;
+    fn try_send(&self, preconfirmations: Vec<Preconfirmation>) -> Vec<Preconfirmation>;
 
     /// Send a batch of pre-confirmations, awaiting for the send to be successful.
     fn send(
         &self,
-        preconfirmations: Vec<PreconfirmationStatus>,
+        preconfirmations: Vec<Preconfirmation>,
     ) -> impl Future<Output = ()> + Send;
 }

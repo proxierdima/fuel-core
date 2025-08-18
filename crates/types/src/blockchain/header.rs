@@ -1,9 +1,11 @@
 //! Block header types
 
-mod v1;
+/// The V1 version of the header.
+pub mod v1;
 
+/// The V2 version of the header.
 #[cfg(feature = "fault-proving")]
-mod v2;
+pub mod v2;
 
 use super::{
     consensus::ConsensusType,
@@ -18,10 +20,10 @@ use crate::{
     fuel_merkle::binary::root_calculator::MerkleRootCalculator,
     fuel_tx::Transaction,
     fuel_types::{
-        canonical::Serialize,
         BlockHeight,
         Bytes32,
         MessageId,
+        canonical::Serialize,
     },
 };
 use educe::Educe;
@@ -328,7 +330,7 @@ pub type ConsensusParametersVersion = u32;
 pub type StateTransitionBytecodeVersion = u32;
 
 /// The latest version of the state transition bytecode.
-pub const LATEST_STATE_TRANSITION_VERSION: StateTransitionBytecodeVersion = 24;
+pub const LATEST_STATE_TRANSITION_VERSION: StateTransitionBytecodeVersion = 31;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]

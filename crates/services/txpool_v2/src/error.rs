@@ -59,6 +59,19 @@ pub enum Error {
         /// The minimum gas price required by TxPool.
         minimal_gas_price: Word,
     },
+    #[display(fmt = "The message input {_0:#x} was already spent")]
+    MessageInputWasAlreadySpent(Nonce),
+    #[display(fmt = "The UTXO input {_0:#x} was already spent")]
+    UtxoInputWasAlreadySpent(UtxoId),
+}
+
+impl Error {
+    pub fn is_duplicate_tx(&self) -> bool {
+        matches!(
+            self,
+            Error::InputValidation(InputValidationError::DuplicateTxId(_))
+        )
+    }
 }
 
 #[derive(Clone, Debug, derive_more::Display)]
@@ -94,6 +107,8 @@ pub enum DependencyError {
     #[display(fmt = "The dependent transaction creates a diamond problem, \
     causing cycles in the dependency graph.")]
     DependentTransactionIsADiamondDeath,
+    #[display(fmt = "The transaction depends on a blob transaction")]
+    NotInsertedDependentOnBlob,
 }
 
 #[derive(Clone, Debug)]
@@ -127,9 +142,7 @@ pub(crate) enum InputValidationErrorType {
 
 #[derive(Clone, Debug, derive_more::Display)]
 pub enum InputValidationError {
-    #[display(
-        fmt = "Input output mismatch. Coin owner is different from expected input"
-    )]
+    #[display(fmt = "Input output mismatch. Coin owner is different from expected input")]
     NotInsertedIoWrongOwner,
     #[display(fmt = "Input output mismatch. Coin output does not match expected input")]
     NotInsertedIoWrongAmount,

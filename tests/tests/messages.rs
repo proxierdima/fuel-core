@@ -9,31 +9,31 @@ use fuel_core::{
     },
 };
 use fuel_core_client::client::{
+    FuelClient,
     pagination::{
         PageDirection,
         PaginationRequest,
     },
     types::{
+        TransactionStatus,
         assemble_tx::{
             ChangePolicy,
             RequiredBalance,
         },
         message::MessageStatus,
-        TransactionStatus,
     },
-    FuelClient,
 };
 use fuel_core_types::{
     fuel_asm::{
-        op,
         GTFArgs,
         RegId,
+        op,
     },
     fuel_crypto::*,
     fuel_merkle,
     fuel_tx::{
-        input::message::compute_message_id,
         Word,
+        input::message::compute_message_id,
         *,
     },
     fuel_types::ChainId,
@@ -483,13 +483,7 @@ async fn can_get_message_proof() {
 
             // 3. Verify the message proof. (message receipt root, message id, proof index, proof set, num message receipts in the block)
             let message_proof_index = result.message_proof.proof_index;
-            let message_proof_set: Vec<_> = result
-                .message_proof
-                .proof_set
-                .iter()
-                .cloned()
-                .map(Bytes32::from)
-                .collect();
+            let message_proof_set: Vec<_> = result.message_proof.proof_set.to_vec();
             assert!(verify_merkle(
                 result.message_block_header.message_outbox_root,
                 &generated_message_id,
@@ -517,13 +511,7 @@ async fn can_get_message_proof() {
 
             // 4. Verify the block proof. (prev_root, block id, proof index, proof set, block count)
             let block_proof_index = result.block_proof.proof_index;
-            let block_proof_set: Vec<_> = result
-                .block_proof
-                .proof_set
-                .iter()
-                .cloned()
-                .map(Bytes32::from)
-                .collect();
+            let block_proof_set: Vec<_> = result.block_proof.proof_set.to_vec();
             let blocks_count = result.commit_block_header.height;
             assert!(verify_merkle(
                 result.commit_block_header.prev_root,

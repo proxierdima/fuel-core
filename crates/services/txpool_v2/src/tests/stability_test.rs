@@ -18,7 +18,6 @@ use crate::{
 };
 use fuel_core_types::{
     fuel_tx::{
-        field::Tip,
         ConsensusParameters,
         Finalizable,
         GasCosts,
@@ -28,6 +27,7 @@ use fuel_core_types::{
         TransactionBuilder,
         TxId,
         UtxoId,
+        field::Tip,
     },
     fuel_types::AssetId,
     fuel_vm::checked_transaction::{
@@ -40,10 +40,10 @@ use fuel_core_types::{
     },
 };
 use rand::{
-    prelude::SliceRandom,
-    rngs::StdRng,
     Rng,
     SeedableRng,
+    prelude::SliceRandom,
+    rngs::StdRng,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -186,6 +186,7 @@ fn stability_test_with_seed(seed: u64, limits: Limits, config: Config) {
             maximum_txs: u16::MAX,
             maximum_block_size: u32::MAX,
             minimal_gas_price: 0,
+            excluded_contracts: Default::default(),
         });
 
         if result.is_empty() {

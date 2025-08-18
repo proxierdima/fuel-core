@@ -24,7 +24,7 @@ use fuel_core_tx_status_manager::TxStatusMessage;
 use fuel_core_txpool::error::RemovedReason;
 use fuel_core_types::{
     fuel_types::Bytes32,
-    services::txpool::TransactionStatus,
+    services::transaction_status::TransactionStatus,
     tai64::Tai64,
 };
 use futures::StreamExt;
@@ -265,16 +265,16 @@ fn test_tsc_inner(
     let out = RT.with(|rt| {
         rt.block_on(async {
             let mut mock_state = super::MockTxnStatusChangeState::new();
-            mock_state
-                .expect_get_tx_status()
-                .returning(move |_| match state.clone() {
+            mock_state.expect_get_tx_status().returning(move |_, _| {
+                match state.clone() {
                     Ok(Some(t)) => Ok(Some(t)),
                     Ok(None) => Ok(None),
                     Err(_) => Err(StorageError::NotFound("", "")),
-                });
+                }
+            });
 
             let stream = futures::stream::iter(stream).boxed();
-            super::transaction_status_change(mock_state, stream, txn_id(0))
+            super::transaction_status_change(mock_state, stream, txn_id(0), true)
                 .await
                 .collect::<Vec<_>>()
                 .await

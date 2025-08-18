@@ -1,9 +1,9 @@
 use crate::{
     database::{
-        convert_to_rocksdb_direction,
-        database_description::DatabaseDescription,
         Error as DatabaseError,
         Result as DatabaseResult,
+        convert_to_rocksdb_direction,
+        database_description::DatabaseDescription,
     },
     state::IterDirection,
 };
@@ -12,8 +12,11 @@ use super::rocks_db_key_iterator::{
     ExtractItem,
     RocksDBKeyIterator,
 };
+use core::ops::Deref;
 use fuel_core_metrics::core_metrics::DatabaseMetrics;
 use fuel_core_storage::{
+    Error as StorageError,
+    Result as StorageResult,
     iter::{
         BoxedIter,
         IntoBoxedIter,
@@ -32,8 +35,6 @@ use fuel_core_storage::{
         ReferenceBytesKey,
         StorageChanges,
     },
-    Error as StorageError,
-    Result as StorageResult,
 };
 use itertools::Itertools;
 use rocksdb::{
@@ -71,6 +72,23 @@ use std::{
     },
 };
 use tempfile::TempDir;
+
+#[derive(Debug)]
+struct PrimaryInstance(DBWithThreadMode<MultiThreaded>);
+
+impl Deref for PrimaryInstance {
+    type Target = DBWithThreadMode<MultiThreaded>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl Drop for PrimaryInstance {
+    fn drop(&mut self) {
+        self.cancel_all_background_work(true);
+    }
+}
 
 type DB = DBWithThreadMode<MultiThreaded>;
 
@@ -135,7 +153,7 @@ impl DatabaseConfig {
 
 pub struct RocksDb<Description> {
     read_options: ReadOptions,
-    db: Arc<DB>,
+    db: Arc<PrimaryInstance>,
     block_opts: Arc<BlockBasedOptions>,
     create_family: Option<Arc<Mutex<BTreeMap<String, Options>>>>,
     snapshot: Option<rocksdb::SnapshotWithThreadMode<'static, DB>>,
@@ -150,7 +168,6 @@ impl<Description> Drop for RocksDb<Description> {
         // Drop the snapshot before the db.
         // Dropping the snapshot after the db will cause a sigsegv.
         self.snapshot = None;
-        self.db.cancel_all_background_work(true);
     }
 }
 
@@ -402,7 +419,7 @@ where
             }
             ColumnsPolicy::Lazy => Some(Arc::new(Mutex::new(cf_descriptors_to_create))),
         };
-        let db = Arc::new(db);
+        let db = Arc::new(PrimaryInstance(db));
 
         let rocks_db = RocksDb {
             read_options: Self::generate_read_options(&None),
@@ -478,8 +495,8 @@ where
         let family = self.db.cf_handle(&Self::col_name(column));
 
         match family {
-            None => {
-                if let Some(create_family) = &self.create_family {
+            None => match &self.create_family {
+                Some(create_family) => {
                     let mut lock = create_family
                         .lock()
                         .expect("The create family lock should be available");
@@ -499,10 +516,11 @@ where
                     let family = self.db.cf_handle(&name).expect("invalid column state");
 
                     family
-                } else {
+                }
+                _ => {
                     panic!("Columns in the DB should have been created on DB opening");
                 }
-            }
+            },
             Some(family) => family,
         }
     }
@@ -539,7 +557,7 @@ where
         &self,
         prefix: &[u8],
         column: Description::Column,
-    ) -> impl Iterator<Item = StorageResult<T::Item>> + '_
+    ) -> impl Iterator<Item = StorageResult<T::Item>> + '_ + use<'_, T, Description>
     where
         T: ExtractItem,
     {
@@ -558,29 +576,32 @@ where
             )
         });
 
-        if let Some(iterator) = reverse_iterator {
-            let prefix = prefix.to_vec();
-            iterator
-                .take_while(move |item| {
-                    if let Ok(item) = item {
-                        T::starts_with(item, prefix.as_slice())
-                    } else {
-                        true
-                    }
-                })
-                .into_boxed()
-        } else {
-            // No next item, so we can start backward iteration from the end.
-            let prefix = prefix.to_vec();
-            self.iterator::<T>(column, self.read_options(), IteratorMode::End)
-                .take_while(move |item| {
-                    if let Ok(item) = item {
-                        T::starts_with(item, prefix.as_slice())
-                    } else {
-                        true
-                    }
-                })
-                .into_boxed()
+        match reverse_iterator {
+            Some(iterator) => {
+                let prefix = prefix.to_vec();
+                iterator
+                    .take_while(move |item| {
+                        if let Ok(item) = item {
+                            T::starts_with(item, prefix.as_slice())
+                        } else {
+                            true
+                        }
+                    })
+                    .into_boxed()
+            }
+            _ => {
+                // No next item, so we can start backward iteration from the end.
+                let prefix = prefix.to_vec();
+                self.iterator::<T>(column, self.read_options(), IteratorMode::End)
+                    .take_while(move |item| {
+                        if let Ok(item) = item {
+                            T::starts_with(item, prefix.as_slice())
+                        } else {
+                            true
+                        }
+                    })
+                    .into_boxed()
+            }
         }
     }
 
@@ -589,7 +610,7 @@ where
         column: Description::Column,
         opts: ReadOptions,
         iter_mode: IteratorMode,
-    ) -> impl Iterator<Item = StorageResult<T::Item>> + '_
+    ) -> impl Iterator<Item = StorageResult<T::Item>> + '_ + use<'_, T, Description>
     where
         T: ExtractItem,
     {
@@ -748,24 +769,29 @@ where
         backup_dir: &P,
     ) -> DatabaseResult<rocksdb::backup::BackupEngine> {
         use rocksdb::{
+            Env,
             backup::{
                 BackupEngine,
                 BackupEngineOptions,
             },
-            Env,
         };
 
         let backup_dir = backup_dir.as_ref().join(Description::name());
         let backup_dir_path = backup_dir.as_path();
 
-        let backup_engine_options =
-            BackupEngineOptions::new(backup_dir_path).map_err(|e| {
+        let mut backup_engine_options = BackupEngineOptions::new(backup_dir_path)
+            .map_err(|e| {
                 DatabaseError::BackupEngineInitError(anyhow::anyhow!(
                     "Couldn't create backup engine options for path `{}`: {}",
                     backup_dir_path.display(),
                     e
                 ))
             })?;
+
+        let cpu_number =
+            i32::try_from(num_cpus::get()).expect("The number of CPU can't exceed `i32`");
+
+        backup_engine_options.set_max_background_operations(cmp::max(1, cpu_number / 4));
 
         let env = Env::new().map_err(|e| {
             DatabaseError::BackupEngineInitError(anyhow::anyhow!(
@@ -799,7 +825,12 @@ where
             columns_policy: ColumnsPolicy::Lazy,
         };
 
-        let db = Self::default_open(db_dir, db_config)?;
+        let db = Self::open_read_only(
+            db_dir,
+            enum_iterator::all::<Description::Column>().collect::<Vec<_>>(),
+            false,
+            db_config,
+        )?;
 
         backup_engine.create_new_backup(&db.db).map_err(|e| {
             DatabaseError::BackupError(anyhow::anyhow!(
@@ -837,6 +868,10 @@ where
             })?;
 
         Ok(())
+    }
+
+    pub fn shutdown(&self) {
+        while Arc::strong_count(&self.db) > 1 {}
     }
 }
 

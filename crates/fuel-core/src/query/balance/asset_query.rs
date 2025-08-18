@@ -1,9 +1,9 @@
 use crate::graphql_api::database::ReadView;
 use fuel_core_services::stream::IntoBoxStream;
 use fuel_core_storage::{
-    iter::IterDirection,
     Error as StorageError,
     Result as StorageResult,
+    iter::IterDirection,
 };
 use fuel_core_types::{
     entities::coins::{
@@ -30,11 +30,17 @@ pub struct AssetSpendTarget {
     pub id: AssetId,
     pub target: u128,
     pub max: u16,
+    pub allow_partial: bool,
 }
 
 impl AssetSpendTarget {
-    pub fn new(id: AssetId, target: u128, max: u16) -> Self {
-        Self { id, target, max }
+    pub fn new(id: AssetId, target: u128, max: u16, allow_partial: bool) -> Self {
+        Self {
+            id,
+            target,
+            max,
+            allow_partial,
+        }
     }
 }
 
@@ -102,17 +108,16 @@ impl<'a> AssetsQuery<'a> {
             .map(|id| id.map(CoinId::from))
             .filter(move |result| {
                 if let Ok(id) = result {
-                    if let Some(exclude) = self.exclude {
-                        !exclude.coin_ids.contains(id)
-                    } else {
-                        true
+                    match self.exclude {
+                        Some(exclude) => !exclude.coin_ids.contains(id),
+                        _ => true,
                     }
                 } else {
                     true
                 }
             })
             .map(move |res| {
-                res.map_err(StorageError::from).and_then(|id| {
+                res.and_then(|id| {
                     let id = if let CoinId::Utxo(id) = id {
                         id
                     } else {
@@ -146,7 +151,9 @@ impl<'a> AssetsQuery<'a> {
             })
     }
 
-    fn messages_iter(&self) -> impl Stream<Item = StorageResult<CoinType>> + 'a {
+    fn messages_iter(
+        &self,
+    ) -> impl Stream<Item = StorageResult<CoinType>> + 'a + use<'a> {
         let exclude = self.exclude;
         let database = self.database;
         let stream = self

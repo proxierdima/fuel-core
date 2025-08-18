@@ -1,28 +1,29 @@
 use crate::{
     database::{
-        database_description::{
-            on_chain::OnChain,
-            DatabaseDescription,
-        },
         Error as DatabaseError,
         Result as DatabaseResult,
+        database_description::{
+            DatabaseDescription,
+            on_chain::OnChain,
+        },
     },
     state::{
-        in_memory::memory_view::MemoryView,
-        iterable_key_value_view::IterableKeyValueViewWrapper,
         IterDirection,
         IterableKeyValueView,
         KeyValueView,
         TransactableStorage,
+        in_memory::memory_view::MemoryView,
+        iterable_key_value_view::IterableKeyValueViewWrapper,
     },
 };
 use fuel_core_storage::{
+    Result as StorageResult,
     iter::{
-        iterator,
-        keys_iterator,
         BoxedIter,
         IntoBoxedIter,
         IterableStore,
+        iterator,
+        keys_iterator,
     },
     kv_store::{
         KVItem,
@@ -37,7 +38,6 @@ use fuel_core_storage::{
         ReferenceBytesKey,
         StorageChanges,
     },
-    Result as StorageResult,
 };
 use std::{
     collections::{
@@ -63,9 +63,15 @@ where
     Description: DatabaseDescription,
 {
     fn default() -> Self {
-        use strum::EnumCount;
+        use enum_iterator::all;
+
+        let largest_column_idx = all::<Description::Column>()
+            .map(|column| column.as_usize())
+            .max()
+            .expect("there should be atleast 1 column in the storage");
+
         Self {
-            inner: (0..Description::Column::COUNT)
+            inner: (0..=largest_column_idx)
                 .map(|_| Mutex::new(BTreeMap::new()))
                 .collect(),
             _marker: Default::default(),
@@ -100,7 +106,7 @@ where
         prefix: Option<&[u8]>,
         start: Option<&[u8]>,
         direction: IterDirection,
-    ) -> impl Iterator<Item = KVItem> {
+    ) -> impl Iterator<Item = KVItem> + use<Description> {
         let lock = self.inner[column.as_usize()].lock().expect("poisoned");
 
         let collection: Vec<_> = iterator(&lock, prefix, start, direction)
@@ -116,7 +122,7 @@ where
         prefix: Option<&[u8]>,
         start: Option<&[u8]>,
         direction: IterDirection,
-    ) -> impl Iterator<Item = KeyItem> {
+    ) -> impl Iterator<Item = KeyItem> + use<Description> {
         let lock = self.inner[column.as_usize()].lock().expect("poisoned");
 
         let collection: Vec<_> = keys_iterator(&lock, prefix, start, direction)

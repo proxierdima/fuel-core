@@ -14,11 +14,7 @@ use fuel_core_gas_price_service::v1::{
     uninitialized_task::new_gas_price_service_v1,
 };
 
-#[cfg(feature = "p2p")]
-use fuel_core_poa::pre_confirmation_signature_service::PreConfirmationSignatureTask;
 use fuel_core_poa::Trigger;
-#[cfg(feature = "p2p")]
-use fuel_core_services::ServiceRunner;
 use fuel_core_storage::{
     self,
     transactional::AtomicView,
@@ -27,28 +23,31 @@ use fuel_core_storage::{
 use fuel_core_types::blockchain::primitives::DaBlockHeight;
 use fuel_core_types::signer::SignMode;
 
+use fuel_core_compression_service::service::new_service as new_compression_service;
+
 #[cfg(feature = "relayer")]
 use crate::relayer::Config as RelayerConfig;
 
 #[cfg(feature = "p2p")]
 use crate::service::adapters::consensus_module::poa::pre_confirmation_signature::{
-    key_generator::{
-        Ed25519Key,
-        Ed25519KeyGenerator,
-    },
-    parent_signature::FuelParentSigner,
+    key_generator::Ed25519KeyGenerator,
     trigger::TimeBasedTrigger,
     tx_receiver::PreconfirmationsReceiver,
 };
 
 use super::{
+    DbType,
     adapters::{
         FuelBlockSigner,
         P2PAdapter,
         TxStatusManagerAdapter,
+        compression_adapters::{
+            CompressionBlockDBAdapter,
+            CompressionServiceAdapter,
+        },
     },
+    config::DaCompressionMode,
     genesis::create_genesis_block,
-    DbType,
 };
 use crate::{
     combined_database::CombinedDatabase,
@@ -57,10 +56,27 @@ use crate::{
         self,
         Config as GraphQLConfig,
     },
-    graphql_api::worker_service,
+    graphql_api::worker_service::{
+        self,
+    },
     schema::build_schema,
     service::{
+        Config,
+        SharedState,
+        SubServices,
         adapters::{
+            BlockImporterAdapter,
+            BlockProducerAdapter,
+            ChainStateInfoProvider,
+            ExecutorAdapter,
+            MaybeRelayerAdapter,
+            PoAAdapter,
+            PreconfirmationSender,
+            SharedMemoryPool,
+            SystemTime,
+            TxPoolAdapter,
+            UniversalGasPriceProvider,
+            VerifierAdapter,
             chain_state_info_provider,
             consensus_module::poa::InDirectoryPredefinedBlocks,
             fuel_gas_price_provider::FuelGasPriceProvider,
@@ -68,33 +84,17 @@ use crate::{
             import_result_provider::ImportResultProvider,
             ready_signal::ReadySignal,
             tx_status_manager::ConsensusConfigProtocolPublicKey,
-            BlockImporterAdapter,
-            BlockProducerAdapter,
-            ChainStateInfoProvider,
-            ExecutorAdapter,
-            MaybeRelayerAdapter,
-            PoAAdapter,
-            SharedMemoryPool,
-            SystemTime,
-            TxPoolAdapter,
-            UniversalGasPriceProvider,
-            VerifierAdapter,
         },
-        Config,
-        SharedState,
-        SubServices,
     },
 };
 
 pub type PoAService = fuel_core_poa::Service<
-    TxPoolAdapter,
     BlockProducerAdapter,
     BlockImporterAdapter,
     SignMode,
     InDirectoryPredefinedBlocks,
     SystemTime,
     ReadySignal,
-    TxStatusManagerAdapter,
 >;
 #[cfg(feature = "p2p")]
 pub type P2PService = fuel_core_p2p::service::Service<Database, TxPoolAdapter>;
@@ -121,8 +121,11 @@ pub fn init_sub_services(
     let chain_name = chain_config.chain_name.clone();
     let on_chain_view = database.on_chain().latest_view()?;
     let (new_txs_updater, new_txs_watcher) = tokio::sync::watch::channel(());
-    let (preconfirmation_sender, _preconfirmation_receiver) =
+    #[cfg(feature = "p2p")]
+    let (preconfirmation_sender, preconfirmation_receiver) =
         tokio::sync::mpsc::channel(1024);
+    #[cfg(not(feature = "p2p"))]
+    let (preconfirmation_sender, _) = tokio::sync::mpsc::channel(1024);
 
     let genesis_block = on_chain_view
         .genesis_block()?
@@ -142,6 +145,49 @@ pub fn init_sub_services(
         ));
     }
 
+    #[cfg(feature = "p2p")]
+    let p2p_externals = config
+        .p2p
+        .clone()
+        .map(fuel_core_p2p::service::build_shared_state);
+
+    #[cfg(feature = "p2p")]
+    let p2p_adapter = {
+        use crate::service::adapters::PeerReportConfig;
+
+        // Hardcoded for now, but left here to be configurable in the future.
+        // TODO: https://github.com/FuelLabs/fuel-core/issues/1340
+        let peer_report_config = PeerReportConfig {
+            successful_block_import: 5.,
+            missing_block_headers: -100.,
+            bad_block_header: -100.,
+            missing_transactions: -100.,
+            invalid_transactions: -100.,
+        };
+        P2PAdapter::new(
+            p2p_externals.as_ref().map(|ext| ext.0.clone()),
+            peer_report_config,
+        )
+    };
+
+    #[cfg(not(feature = "p2p"))]
+    let p2p_adapter = P2PAdapter::new();
+
+    let protocol_pubkey =
+        ConsensusConfigProtocolPublicKey::new(chain_config.consensus.clone());
+
+    let tx_status_manager = fuel_core_tx_status_manager::new_service(
+        p2p_adapter.clone(),
+        config.tx_status_manager.clone(),
+        protocol_pubkey,
+    );
+    let tx_status_manager_adapter =
+        TxStatusManagerAdapter::new(tx_status_manager.shared.clone());
+    let preconfirmation_sender = PreconfirmationSender::new(
+        preconfirmation_sender,
+        tx_status_manager_adapter.clone(),
+    );
+
     let upgradable_executor_config = fuel_core_upgradable_executor::config::Config {
         forbid_fake_coins_default: config.utxo_validation,
         native_executor_version: config.native_executor_version,
@@ -152,7 +198,7 @@ pub fn init_sub_services(
         database.relayer().clone(),
         upgradable_executor_config,
         new_txs_watcher,
-        preconfirmation_sender,
+        preconfirmation_sender.clone(),
     );
     let import_result_provider =
         ImportResultProvider::new(database.on_chain().clone(), executor.clone());
@@ -200,34 +246,6 @@ pub fn init_sub_services(
         ),
     };
 
-    #[cfg(feature = "p2p")]
-    let p2p_externals = config
-        .p2p
-        .clone()
-        .map(fuel_core_p2p::service::build_shared_state);
-
-    #[cfg(feature = "p2p")]
-    let p2p_adapter = {
-        use crate::service::adapters::PeerReportConfig;
-
-        // Hardcoded for now, but left here to be configurable in the future.
-        // TODO: https://github.com/FuelLabs/fuel-core/issues/1340
-        let peer_report_config = PeerReportConfig {
-            successful_block_import: 5.,
-            missing_block_headers: -100.,
-            bad_block_header: -100.,
-            missing_transactions: -100.,
-            invalid_transactions: -100.,
-        };
-        P2PAdapter::new(
-            p2p_externals.as_ref().map(|ext| ext.0.clone()),
-            peer_report_config,
-        )
-    };
-
-    #[cfg(not(feature = "p2p"))]
-    let p2p_adapter = P2PAdapter::new();
-
     let genesis_block_height = *genesis_block.header().height();
     let settings = chain_state_info_provider.clone();
     let block_stream = importer_adapter.events_shared_result();
@@ -257,17 +275,6 @@ pub fn init_sub_services(
         universal_gas_price_provider.clone(),
     );
 
-    let protocol_pubkey =
-        ConsensusConfigProtocolPublicKey::new(chain_config.consensus.clone());
-
-    let tx_status_manager = fuel_core_tx_status_manager::new_service(
-        p2p_adapter.clone(),
-        config.tx_status_manager.clone(),
-        protocol_pubkey,
-    );
-    let tx_status_manager_adapter =
-        TxStatusManagerAdapter::new(tx_status_manager.shared.clone());
-
     let txpool = fuel_core_txpool::new_service(
         chain_id,
         config.txpool.clone(),
@@ -279,7 +286,7 @@ pub fn init_sub_services(
         universal_gas_price_provider.clone(),
         executor.clone(),
         new_txs_updater,
-        tx_status_manager_adapter.clone(),
+        preconfirmation_sender,
     );
     let tx_pool_adapter = TxPoolAdapter::new(txpool.shared.clone());
 
@@ -314,12 +321,15 @@ pub fn init_sub_services(
     let poa_config: fuel_core_poa::Config = config.into();
     let mut production_enabled = !matches!(poa_config.trigger, Trigger::Never);
 
-    if !production_enabled && config.debug {
+    if !production_enabled
+        && config.debug
+        && !matches!(poa_config.signer, SignMode::Unavailable)
+    {
         production_enabled = true;
         tracing::info!("Enabled manual block production because of `debug` flag");
     }
 
-    let signer = Arc::new(FuelBlockSigner::new(config.consensus_signer.clone()));
+    let signer = FuelBlockSigner::new(config.consensus_signer.clone());
 
     #[cfg(feature = "shared-sequencer")]
     let shared_sequencer = {
@@ -328,7 +338,7 @@ pub fn init_sub_services(
         fuel_core_shared_sequencer::service::new_service(
             importer_adapter.clone(),
             config,
-            signer.clone(),
+            Arc::new(signer.clone()),
         )?
     };
 
@@ -336,27 +346,36 @@ pub fn init_sub_services(
         InDirectoryPredefinedBlocks::new(config.predefined_blocks_path.clone());
 
     #[cfg(feature = "p2p")]
-    let _pre_confirmation_service: ServiceRunner<
-        PreConfirmationSignatureTask<
-            PreconfirmationsReceiver,
-            P2PAdapter,
-            FuelParentSigner,
-            Ed25519KeyGenerator,
-            Ed25519Key,
-            TimeBasedTrigger<SystemTime>,
-        >,
-    >;
+    let config_preconfirmation: fuel_core_poa::pre_confirmation_signature_service::config::Config =
+        config.into();
+
+    #[cfg(feature = "p2p")]
+    let pre_confirmation_service = production_enabled
+        .then(|| {
+            fuel_core_poa::pre_confirmation_signature_service::new_service(
+                config_preconfirmation.clone(),
+                PreconfirmationsReceiver::new(preconfirmation_receiver),
+                p2p_adapter.clone(),
+                signer.clone(),
+                Ed25519KeyGenerator,
+                TimeBasedTrigger::new(
+                    SystemTime,
+                    config_preconfirmation.key_rotation_interval,
+                    config_preconfirmation.key_expiration_interval,
+                ),
+            )
+        })
+        .transpose()?;
 
     let poa = production_enabled.then(|| {
         fuel_core_poa::new_service(
             &last_block_header,
             poa_config,
             tx_pool_adapter.clone(),
-            tx_status_manager_adapter.clone(),
             producer_adapter.clone(),
             importer_adapter.clone(),
             p2p_adapter.clone(),
-            signer,
+            Arc::new(signer),
             predefined_blocks,
             SystemTime,
             block_production_ready_signal,
@@ -377,6 +396,30 @@ pub fn init_sub_services(
         config.sync,
     )?;
 
+    // we allow the consumers of the database access even
+    // when the compression service is disabled
+    let compression_service_adapter =
+        CompressionServiceAdapter::new(database.compression().clone());
+
+    let compression_importer_adapter = CompressionBlockDBAdapter::new(
+        importer_adapter.clone(),
+        database.on_chain().clone(),
+    );
+
+    let compression_service = match &config.da_compression {
+        DaCompressionMode::Disabled => None,
+        DaCompressionMode::Enabled(cfg) => Some(
+            new_compression_service(
+                compression_importer_adapter,
+                database.compression().clone(),
+                cfg.clone(),
+                database.on_chain().clone(),
+                chain_id,
+            )
+            .map_err(|e| anyhow::anyhow!(e))?,
+        ),
+    };
+
     let schema = crate::schema::dap::init(build_schema(), config.debug)
         .data(database.on_chain().clone());
 
@@ -387,8 +430,8 @@ pub fn init_sub_services(
         block_importer: graphql_block_importer,
         on_chain_database: database.on_chain().clone(),
         off_chain_database: database.off_chain().clone(),
-        da_compression_config: config.da_compression.clone(),
         continue_on_error: config.continue_on_error,
+        block_subscriptions_queue: config.graphql_config.block_subscriptions_queue,
         consensus_parameters: &chain_config.consensus_parameters,
     };
     let graphql_worker =
@@ -401,6 +444,7 @@ pub fn init_sub_services(
         utxo_validation: config.utxo_validation,
         debug: config.debug,
         historical_execution: config.historical_execution,
+        expensive_subscriptions: config.expensive_subscriptions,
         max_tx: config.txpool.pool_limits.max_txs,
         max_gas: config.txpool.pool_limits.max_gas,
         max_size: config.txpool.pool_limits.max_bytes_size,
@@ -423,6 +467,7 @@ pub fn init_sub_services(
         Box::new(chain_state_info_provider),
         SharedMemoryPool::new(config.memory_pool_size),
         graphql_block_height_subscription_handle,
+        Box::new(compression_service_adapter),
     )?;
 
     let shared = SharedState {
@@ -438,6 +483,7 @@ pub fn init_sub_services(
         executor,
         config: config.clone(),
         tx_status_manager: tx_status_manager_adapter,
+        compression: compression_service.as_ref().map(|c| c.shared.clone()),
     };
 
     #[allow(unused_mut)]
@@ -458,6 +504,9 @@ pub fn init_sub_services(
         if let Some(network) = network.take() {
             services.push(Box::new(network));
             services.push(Box::new(sync));
+            if let Some(pre_confirmation_service) = pre_confirmation_service {
+                services.push(Box::new(pre_confirmation_service));
+            }
         }
     }
     #[cfg(feature = "shared-sequencer")]
@@ -466,6 +515,10 @@ pub fn init_sub_services(
     services.push(Box::new(graph_ql));
     services.push(Box::new(graphql_worker));
     services.push(Box::new(tx_status_manager));
+
+    if let Some(compression_service) = compression_service {
+        services.push(Box::new(compression_service));
+    }
 
     // always make sure that the block producer is inserted last
     if let Some(poa) = poa {

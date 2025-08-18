@@ -1,5 +1,6 @@
 use crate::{
     fuel_core_graphql_api::{
+        Config,
         extensions::unify_response,
         ports::{
             BlockProducerPort,
@@ -13,7 +14,6 @@ use crate::{
             TxPoolPort,
             TxStatusManager,
         },
-        Config,
     },
     graphql_api::{
         self,
@@ -34,35 +34,35 @@ use crate::{
     },
 };
 use async_graphql::{
-    http::GraphiQLSource,
     Request,
     Response,
+    http::GraphiQLSource,
 };
 use axum::{
+    Json,
+    Router,
     extract::{
         DefaultBodyLimit,
         Extension,
     },
     http::{
+        HeaderValue,
         header::{
             ACCESS_CONTROL_ALLOW_HEADERS,
             ACCESS_CONTROL_ALLOW_METHODS,
             ACCESS_CONTROL_ALLOW_ORIGIN,
         },
-        HeaderValue,
     },
     response::{
-        sse::Event,
         Html,
         IntoResponse,
         Sse,
+        sse::Event,
     },
     routing::{
         get,
         post,
     },
-    Json,
-    Router,
 };
 use fuel_core_services::{
     AsyncProcessor,
@@ -83,7 +83,10 @@ use std::{
         TcpListener,
     },
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        OnceLock,
+    },
 };
 use tokio_stream::StreamExt;
 use tower::limit::ConcurrencyLimitLayer;
@@ -96,12 +99,10 @@ use tower_http::{
 pub type Service = fuel_core_services::ServiceRunner<GraphqlService>;
 
 pub use super::database::ReadDatabase;
-use super::{
-    block_height_subscription,
-    ports::{
-        worker,
-        OnChainDatabaseAt,
-    },
+use super::ports::{
+    DatabaseDaCompressedBlocks,
+    OnChainDatabaseAt,
+    worker,
 };
 
 pub type BlockProducer = Box<dyn BlockProducerPort>;
@@ -115,6 +116,8 @@ pub type P2pService = Box<dyn P2pPort>;
 pub type GasPriceProvider = Box<dyn GasPriceEstimate>;
 
 pub type ChainInfoProvider = Box<dyn ChainStateProviderTrait>;
+
+pub type DaCompressionProvider = Box<dyn DatabaseDaCompressedBlocks>;
 
 #[derive(Clone)]
 pub struct SharedState {
@@ -244,7 +247,8 @@ pub fn new_service<OnChain, OffChain>(
     gas_price_provider: GasPriceProvider,
     chain_state_info_provider: ChainInfoProvider,
     memory_pool: SharedMemoryPool,
-    block_height_subscriber: block_height_subscription::Subscriber,
+    worker_shared_state: graphql_api::worker_service::SharedState,
+    da_compression_provider: DaCompressionProvider,
 ) -> anyhow::Result<Service>
 where
     OnChain: HistoricalView<Height = BlockHeight> + 'static,
@@ -289,7 +293,7 @@ where
         .limit_directives(config.config.max_queries_directives)
         // The ordering for extensions meters, the `ChainStateInfoExtension` should be the
         // first, because it adds additional information to the final response.
-        .extension(ChainStateInfoExtension::new(block_height_subscriber.clone()))
+        .extension(ChainStateInfoExtension::new(worker_shared_state.block_height_subscription_handler.subscribe()))
         .extension(MetricsExtension::new(
             config.config.query_log_threshold_time,
         ))
@@ -303,7 +307,8 @@ where
         .data(gas_price_provider)
         .data(chain_state_info_provider)
         .data(memory_pool)
-        .data(block_height_subscriber.clone())
+        .data(da_compression_provider)
+        .data(worker_shared_state.clone())
         .extension(ValidationExtension::new(
             max_queries_resolver_recursive_depth,
         ))
@@ -311,7 +316,7 @@ where
         .extension(RequiredFuelBlockHeightExtension::new(
             required_fuel_block_height_tolerance,
             required_fuel_block_height_timeout,
-            block_height_subscriber,
+            worker_shared_state.block_height_subscription_handler.subscribe(),
         ))
         .finish();
 
@@ -368,17 +373,43 @@ where
     ))
 }
 
-async fn render_graphql_playground(
+/// Single initialization of the GraphQL playground HTML.
+/// This is because the rendering and replacing is expensive
+static GRAPHQL_PLAYGROUND_HTML: OnceLock<Arc<String>> = OnceLock::new();
+
+fn _render_graphql_playground(
     endpoint: &str,
     subscription_endpoint: &str,
-) -> impl IntoResponse {
-    Html(
-        GraphiQLSource::build()
+) -> impl IntoResponse + Send + Sync {
+    let html = GRAPHQL_PLAYGROUND_HTML.get_or_init(|| {
+        let raw_html = GraphiQLSource::build()
             .endpoint(endpoint)
             .subscription_endpoint(subscription_endpoint)
             .title("Fuel Graphql Playground")
-            .finish(),
-    )
+            .finish();
+
+        // this may not be necessary in the future,
+        // but we need it to patch: https://github.com/async-graphql/async-graphql/issues/1703
+        let raw_html = raw_html.replace(
+            "https://unpkg.com/graphiql/graphiql.min.js",
+            "https://unpkg.com/graphiql@3/graphiql.min.js",
+        );
+        let raw_html = raw_html.replace(
+            "https://unpkg.com/graphiql/graphiql.min.css",
+            "https://unpkg.com/graphiql@3/graphiql.min.css",
+        );
+
+        Arc::new(raw_html)
+    });
+
+    Html(html.as_str())
+}
+
+async fn render_graphql_playground(
+    endpoint: &str,
+    subscription_endpoint: &str,
+) -> impl IntoResponse + Send + Sync {
+    _render_graphql_playground(endpoint, subscription_endpoint)
 }
 
 async fn health() -> Json<serde_json::Value> {

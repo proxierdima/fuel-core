@@ -32,7 +32,7 @@ pub struct BoxedIter<'a, T> {
     iter: Box<dyn Iterator<Item = T> + 'a + Send>,
 }
 
-impl<'a, T> Iterator for BoxedIter<'a, T> {
+impl<T> Iterator for BoxedIter<'_, T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -346,7 +346,7 @@ pub fn iterator<'a, V>(
     prefix: Option<&[u8]>,
     start: Option<&[u8]>,
     direction: IterDirection,
-) -> impl Iterator<Item = (&'a ReferenceBytesKey, &'a V)> + 'a
+) -> impl Iterator<Item = (&'a ReferenceBytesKey, &'a V)> + 'a + use<'a, V>
 where
     V: Send + Sync,
 {
@@ -404,7 +404,7 @@ pub fn keys_iterator<'a, V>(
     prefix: Option<&[u8]>,
     start: Option<&[u8]>,
     direction: IterDirection,
-) -> impl Iterator<Item = &'a ReferenceBytesKey> + 'a
+) -> impl Iterator<Item = &'a ReferenceBytesKey> + 'a + use<'a, V>
 where
     V: Send + Sync,
 {

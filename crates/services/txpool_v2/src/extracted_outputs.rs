@@ -4,10 +4,6 @@ use std::collections::HashMap;
 
 use fuel_core_types::{
     fuel_tx::{
-        input::coin::{
-            CoinPredicate,
-            CoinSigned,
-        },
         Address,
         AssetId,
         ContractId,
@@ -15,6 +11,10 @@ use fuel_core_types::{
         Output,
         TxId,
         UtxoId,
+        input::coin::{
+            CoinPredicate,
+            CoinSigned,
+        },
     },
     services::txpool::ArcPoolTx,
 };
@@ -42,6 +42,42 @@ impl Default for ExtractedOutputs {
 }
 
 impl ExtractedOutputs {
+    pub fn new_extracted_outputs<'a>(
+        &mut self,
+        outputs: impl Iterator<Item = &'a (UtxoId, Output)>,
+    ) {
+        for (utxo_id, output) in outputs {
+            match output {
+                Output::ContractCreated { contract_id, .. } => {
+                    self.contract_created.insert(*contract_id, *utxo_id.tx_id());
+                }
+                Output::Coin {
+                    to,
+                    amount,
+                    asset_id,
+                }
+                | Output::Change {
+                    amount,
+                    asset_id,
+                    to,
+                }
+                | Output::Variable {
+                    amount,
+                    asset_id,
+                    to,
+                } => {
+                    self.coins_created
+                        .entry(*utxo_id.tx_id())
+                        .or_default()
+                        .insert(utxo_id.output_index(), (*to, *amount, *asset_id));
+                }
+                Output::Contract { .. } => {
+                    continue;
+                }
+            }
+        }
+    }
+
     pub fn new_extracted_transaction(&mut self, tx: &ArcPoolTx) {
         let tx_id = tx.id();
         for (idx, output) in tx.outputs().iter().enumerate() {
@@ -118,10 +154,10 @@ impl ExtractedOutputs {
     ) -> bool {
         self.coins_created
             .get(utxo_id.tx_id())
-            .map_or(false, |coins| {
+            .is_some_and(|coins| {
                 coins
                     .get(&utxo_id.output_index())
-                    .map_or(false, |(a, am, asid)| {
+                    .is_some_and(|(a, am, asid)| {
                         a == address && am == amount && asid == asset_id
                     })
             })

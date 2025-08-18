@@ -10,12 +10,15 @@
 pub mod config;
 /// Error types for the compression service
 pub mod errors;
+pub(crate) mod metrics;
 /// Ports for the compression service
 pub mod ports;
 /// Service definition for the compression service
 pub mod service;
 /// Storage traits for the compression service
 pub mod storage;
+/// Sync state for the compression service
+pub mod sync_state;
 /// Temporal Registry implementations
 pub mod temporal_registry;
 

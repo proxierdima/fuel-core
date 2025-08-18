@@ -2,6 +2,7 @@ use fuel_core::{
     chain_config::{
         ChainConfig,
         ContractConfig,
+        MessageConfig,
         StateConfig,
         TESTNET_WALLET_SECRETS,
     },
@@ -11,7 +12,10 @@ use fuel_core::{
     },
 };
 use fuel_core_client::client::{
+    FuelClient,
     types::{
+        CoinType,
+        TransactionStatus,
         assemble_tx::{
             ChangePolicy,
             RequiredBalance,
@@ -20,21 +24,17 @@ use fuel_core_client::client::{
             Bytes32,
             ContractId,
         },
-        CoinType,
-        TransactionStatus,
     },
-    FuelClient,
 };
 use fuel_core_types::{
     blockchain::transaction::TransactionExt,
     fuel_asm::{
-        op,
         GTFArgs,
         RegId,
+        op,
     },
     fuel_crypto::SecretKey,
     fuel_tx::{
-        policies::Policies,
         Address,
         AssetId,
         Input,
@@ -43,8 +43,12 @@ use fuel_core_types::{
         TransactionBuilder,
         TxPointer,
         Word,
+        policies::Policies,
     },
-    fuel_types::canonical::Serialize,
+    fuel_types::{
+        Nonce,
+        canonical::Serialize,
+    },
     fuel_vm::consts::WORD_SIZE,
     services::executor::TransactionExecutionResult,
 };
@@ -54,6 +58,7 @@ use test_helpers::{
         SigningAccount,
     },
     config_with_fee,
+    default_signing_secret,
     default_signing_wallet,
 };
 
@@ -242,6 +247,77 @@ async fn assemble_transaction__user_provided_change_output() {
 }
 
 #[tokio::test]
+async fn assemble_transaction__finds_another_input_if_inputs_not_spendable() {
+    // Given
+    let data = [5; 99].to_vec();
+
+    let mut state_config = StateConfig::default();
+    let secret = default_signing_secret();
+    let recipient = Address::from(*secret.public_key().hash());
+    let account = SigningAccount::Wallet(secret);
+    let nonce: Nonce = [1; 32].into();
+    let amount = Word::MAX / 2;
+    let sender = Address::default();
+    let message = MessageConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        nonce: nonce.clone(),
+        amount,
+        data: data.clone(),
+        ..Default::default()
+    };
+    let second_message = MessageConfig {
+        sender: sender.clone(),
+        recipient: recipient.clone(),
+        nonce: [2; 32].into(),
+        amount: Word::MAX / 2,
+        data: vec![],
+        ..Default::default()
+    };
+    state_config.messages.push(message.clone());
+    state_config.messages.push(second_message.clone());
+    let mut config = Config::local_node_with_state_config(state_config);
+    config.utxo_validation = true;
+    config.txpool.utxo_validation = true;
+    config.gas_price_config.min_exec_gas_price = 1000;
+
+    let base_asset_id = config.base_asset_id();
+    let service = FuelService::new_node(config).await.unwrap();
+    let client = FuelClient::from(service.bound_address);
+
+    let tx = Transaction::script(
+        0,
+        vec![],
+        vec![],
+        Policies::new(),
+        vec![Input::message_data_signed(
+            message.sender,
+            message.recipient,
+            message.amount,
+            message.nonce,
+            0,
+            message.data,
+        )],
+        vec![Output::Change {
+            asset_id: base_asset_id,
+            to: account.owner(),
+            amount: 0,
+        }],
+        vec![],
+    );
+
+    // When
+    let res = client
+        .assemble_transaction(&tx.into(), account.clone(), vec![])
+        .await;
+
+    // then
+    let tx = res.unwrap();
+    let status = client.submit_and_await_commit(&tx).await.unwrap();
+    assert!(matches!(status, TransactionStatus::Success { .. }));
+}
+
+#[tokio::test]
 async fn assemble_transaction__transfer_non_based_asset() {
     let mut state_config = StateConfig::local_testnet();
     let chain_config = ChainConfig::local_testnet();
@@ -254,9 +330,9 @@ async fn assemble_transaction__transfer_non_based_asset() {
     assert_ne!(base_asset_id, non_base_asset_id);
 
     // Given
-    state_config.coins[0].owner = owner;
+    state_config.coins[0].owner = owner.into();
     state_config.coins[0].asset_id = base_asset_id;
-    state_config.coins[1].owner = owner;
+    state_config.coins[1].owner = owner.into();
     state_config.coins[1].asset_id = non_base_asset_id;
 
     let mut config = Config::local_node_with_configs(chain_config, state_config);
@@ -314,9 +390,9 @@ async fn assemble_transaction__adds_change_output_for_non_required_non_base_bala
     assert_ne!(base_asset_id, non_base_asset_id);
 
     // Given
-    state_config.coins[0].owner = owner;
+    state_config.coins[0].owner = owner.into();
     state_config.coins[0].asset_id = base_asset_id;
-    state_config.coins[1].owner = owner;
+    state_config.coins[1].owner = owner.into();
     state_config.coins[1].asset_id = non_base_asset_id;
 
     let mut config = Config::local_node_with_configs(chain_config, state_config);

@@ -1,4 +1,6 @@
 use crate::{
+    Config,
+    ImporterResult,
     error::Error,
     local_runner::LocalRunner,
     ports::{
@@ -8,8 +10,6 @@ use crate::{
         Transactional,
         Validator,
     },
-    Config,
-    ImporterResult,
 };
 use fuel_core_metrics::importer::importer_metrics;
 use fuel_core_storage::{
@@ -21,12 +21,12 @@ use fuel_core_storage::{
 };
 use fuel_core_types::{
     blockchain::{
-        consensus::Consensus,
         SealedBlock,
+        consensus::Consensus,
     },
     fuel_tx::{
-        field::MintGasPrice,
         Transaction,
+        field::MintGasPrice,
     },
     fuel_types::{
         BlockHeight,
@@ -55,11 +55,11 @@ use std::{
     },
 };
 use tokio::sync::{
+    OwnedSemaphorePermit,
+    Semaphore,
     broadcast,
     mpsc,
     oneshot,
-    OwnedSemaphorePermit,
-    Semaphore,
 };
 use tracing::warn;
 
@@ -72,6 +72,7 @@ enum CommitInput {
 }
 
 enum Commands {
+    Stop,
     CommitResult {
         result: CommitInput,
         permit: OwnedSemaphorePermit,
@@ -94,7 +95,7 @@ struct ImporterInner<D, E, V> {
     verifier: V,
     chain_id: ChainId,
     broadcast: broadcast::Sender<ImporterResult>,
-    commands: mpsc::Receiver<Commands>,
+    commands: mpsc::UnboundedReceiver<Commands>,
     /// Enables prometheus metrics for this fuel-service
     metrics: bool,
 }
@@ -102,7 +103,7 @@ struct ImporterInner<D, E, V> {
 pub struct Importer {
     broadcast: broadcast::Sender<ImporterResult>,
     guard: Semaphore,
-    commands: mpsc::Sender<Commands>,
+    commands: mpsc::UnboundedSender<Commands>,
     /// The semaphore tracks the number of unprocessed `SharedImportResult`.
     /// If the number of unprocessed results is more than the threshold,
     /// the block importer stops committing new blocks and waits for
@@ -113,10 +114,7 @@ pub struct Importer {
 
 impl Drop for Importer {
     fn drop(&mut self) {
-        // Dropping the sender will close the receiver and stop the inner importer.
-        let (empty_sender, _) = mpsc::channel(1);
-        let sender = core::mem::replace(&mut self.commands, empty_sender);
-        drop(sender);
+        let _ = self.commands.send(Commands::Stop);
 
         let inner = self.inner.take();
 
@@ -148,7 +146,7 @@ impl Importer {
         // that will not be processed.
         let max_block_notify_buffer = config.max_block_notify_buffer;
         let (broadcast, _) = broadcast::channel(max_block_notify_buffer);
-        let (sender, receiver) = mpsc::channel(1);
+        let (sender, receiver) = mpsc::unbounded_channel();
 
         let mut inner = ImporterInner {
             database,
@@ -267,7 +265,7 @@ impl Importer {
             permit,
             callback: sender,
         };
-        self.commands.send(command).await?;
+        self.commands.send(command)?;
         receiver.await?
     }
 
@@ -281,7 +279,7 @@ impl Importer {
             sealed_block,
             callback: sender,
         };
-        self.commands.send(command).await?;
+        self.commands.send(command)?;
         receiver.await?
     }
 
@@ -294,7 +292,7 @@ impl Importer {
             sealed_block,
             callback: sender,
         };
-        self.commands.send(command).await?;
+        self.commands.send(command)?;
         receiver.await?
     }
 }
@@ -494,6 +492,7 @@ where
         let local_runner = LocalRunner::new().expect("Failed to create the local runner");
         while let Some(command) = self.commands.recv().await {
             match command {
+                Commands::Stop => break,
                 Commands::CommitResult {
                     result,
                     permit,

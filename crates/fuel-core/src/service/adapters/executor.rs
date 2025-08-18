@@ -17,11 +17,14 @@ use fuel_core_txpool::Constraints;
 use fuel_core_types::{
     blockchain::primitives::DaBlockHeight,
     services::{
-        preconfirmation::PreconfirmationStatus,
+        preconfirmation::Preconfirmation,
         relayer::Event,
     },
 };
-use std::sync::Arc;
+use std::{
+    collections::HashSet,
+    sync::Arc,
+};
 use tokio::sync::mpsc::error::TrySendError;
 
 use super::PreconfirmationSender;
@@ -39,6 +42,7 @@ impl fuel_core_executor::ports::TransactionsSource for TransactionsSource {
                 max_gas: gas_limit,
                 maximum_txs: transactions_limit,
                 maximum_block_size: block_transaction_size_limit,
+                excluded_contracts: HashSet::default(),
             })
             .unwrap_or_default()
             .into_iter()
@@ -103,22 +107,36 @@ impl NewTxWaiterPort for NewTxWaiter {
 }
 
 impl PreconfirmationSenderPort for PreconfirmationSender {
-    async fn send(&self, preconfirmations: Vec<PreconfirmationStatus>) {
+    async fn send(&self, preconfirmations: Vec<Preconfirmation>) {
+        // TODO: Avoid cloning of the `preconfirmations`
+        self.tx_status_manager_adapter
+            .tx_status_manager_shared_data
+            .update_preconfirmations(preconfirmations.clone());
+
         // If the receiver is closed, it means no one is listening to the preconfirmations and so we can drop them.
         // We don't consider this an error.
-        let _ = self.sender.send(preconfirmations).await;
+        let _ = self.sender_signature_service.send(preconfirmations).await;
     }
 
-    fn try_send(
-        &self,
-        preconfirmations: Vec<PreconfirmationStatus>,
-    ) -> Vec<PreconfirmationStatus> {
-        match self.sender.try_send(preconfirmations) {
-            Ok(()) => vec![],
+    fn try_send(&self, preconfirmations: Vec<Preconfirmation>) -> Vec<Preconfirmation> {
+        match self.sender_signature_service.try_reserve() {
+            Ok(permit) => {
+                // TODO: Avoid cloning of the `preconfirmations`
+                self.tx_status_manager_adapter
+                    .tx_status_manager_shared_data
+                    .update_preconfirmations(preconfirmations.clone());
+                permit.send(preconfirmations);
+                vec![]
+            }
             // If the receiver is closed, it means no one is listening to the preconfirmations and so we can drop them.
             // We don't consider this an error.
-            Err(TrySendError::Closed(_)) => vec![],
-            Err(TrySendError::Full(preconfirmations)) => preconfirmations,
+            Err(TrySendError::Closed(_)) => {
+                self.tx_status_manager_adapter
+                    .tx_status_manager_shared_data
+                    .update_preconfirmations(preconfirmations);
+                vec![]
+            }
+            Err(TrySendError::Full(_)) => preconfirmations,
         }
     }
 }

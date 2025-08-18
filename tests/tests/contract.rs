@@ -4,8 +4,8 @@ use crate::helpers::{
 };
 use fuel_core::{
     database::{
-        database_description::on_chain::OnChain,
         Database,
+        database_description::on_chain::OnChain,
     },
     service::{
         Config,
@@ -13,12 +13,12 @@ use fuel_core::{
     },
 };
 use fuel_core_client::client::{
+    FuelClient,
     pagination::{
         PageDirection,
         PaginationRequest,
     },
     types::TransactionStatus,
-    FuelClient,
 };
 use fuel_core_storage::tables::Coins;
 use fuel_core_types::{
@@ -55,7 +55,7 @@ async fn calling_the_contract_with_enabled_utxo_validation_is_successful() {
             CoinConfig {
                 tx_id: *utxo_id_1.tx_id(),
                 output_index: utxo_id_1.output_index(),
-                owner,
+                owner: owner.into(),
                 amount,
                 asset_id: AssetId::BASE,
                 ..Default::default()
@@ -63,7 +63,7 @@ async fn calling_the_contract_with_enabled_utxo_validation_is_successful() {
             CoinConfig {
                 tx_id: *utxo_id_2.tx_id(),
                 output_index: utxo_id_2.output_index(),
-                owner,
+                owner: owner.into(),
                 amount,
                 asset_id: AssetId::BASE,
                 ..Default::default()

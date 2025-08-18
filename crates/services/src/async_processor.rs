@@ -1,6 +1,6 @@
 use fuel_core_metrics::futures::{
-    metered_future::MeteredFuture,
     FuturesMetrics,
+    metered_future::MeteredFuture,
 };
 use std::{
     future::Future,
@@ -69,10 +69,9 @@ impl AsyncProcessor {
     /// Reserve a slot for a task to be executed.
     pub fn reserve(&self) -> Result<AsyncReservation, OutOfCapacity> {
         let permit = self.semaphore.clone().try_acquire_owned();
-        if let Ok(permit) = permit {
-            Ok(AsyncReservation(permit))
-        } else {
-            Err(OutOfCapacity)
+        match permit {
+            Ok(permit) => Ok(AsyncReservation(permit)),
+            _ => Err(OutOfCapacity),
         }
     }
 
@@ -94,10 +93,9 @@ impl AsyncProcessor {
             result
         };
         let metered_future = MeteredFuture::new(future, self.metric.clone());
-        if let Some(runtime) = &self.thread_pool {
-            runtime.spawn(metered_future)
-        } else {
-            tokio::spawn(metered_future)
+        match &self.thread_pool {
+            Some(runtime) => runtime.spawn(metered_future),
+            _ => tokio::spawn(metered_future),
         }
     }
 
@@ -203,8 +201,8 @@ mod tests {
         assert_eq!(err, OutOfCapacity);
     }
 
-    #[test]
-    fn second_spawn_works_when_first_is_finished() {
+    #[tokio::test]
+    async fn second_spawn_works_when_first_is_finished() {
         const NUMBER_OF_PENDING_TASKS: usize = 1;
         let heavy_task_processor =
             AsyncProcessor::new("Test", 1, NUMBER_OF_PENDING_TASKS).unwrap();
@@ -215,10 +213,8 @@ mod tests {
             sleep(Duration::from_secs(1));
             sender.send(()).unwrap();
         });
-        first_spawn.expect("Expected Ok result");
-        futures::executor::block_on(async move {
-            receiver.await.unwrap();
-        });
+        first_spawn.expect("Expected Ok result").await.unwrap();
+        receiver.await.unwrap();
 
         // When
         let second_spawn = heavy_task_processor.try_spawn(async move {
@@ -327,8 +323,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn executes_10_non_blocking_tasks_for_1_second_with_10_threads__records_idle_time(
-    ) {
+    async fn executes_10_non_blocking_tasks_for_1_second_with_10_threads__records_idle_time()
+     {
         // Given
         const NUMBER_OF_PENDING_TASKS: usize = 10;
         const NUMBER_OF_THREADS: usize = 10;

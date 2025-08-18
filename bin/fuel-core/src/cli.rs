@@ -1,23 +1,25 @@
 use clap::Parser;
 use fuel_core::{
-    upgradable_executor,
     ShutdownListener,
+    upgradable_executor,
 };
 use fuel_core_chain_config::{
     ChainConfig,
+    Owner,
     SnapshotReader,
     StateConfig,
 };
+use fuel_core_types::fuel_tx::Address;
 use std::{
     env,
     path::PathBuf,
     str::FromStr,
 };
 use tracing_subscriber::{
+    Layer,
     filter::EnvFilter,
     layer::SubscriberExt,
     registry,
-    Layer,
 };
 
 #[cfg(feature = "env")]
@@ -127,7 +129,9 @@ pub async fn run_cli() -> anyhow::Result<()> {
     if opt.is_err() {
         let command = run::Command::try_parse();
         if let Ok(command) = command {
-            tracing::warn!("This cli format for running `fuel-core` is deprecated and will be removed. Please use `fuel-core run` or use `--help` for more information");
+            tracing::warn!(
+                "This cli format for running `fuel-core` is deprecated and will be removed. Please use `fuel-core run` or use `--help` for more information"
+            );
             return run::exec(command).await;
         }
     }
@@ -165,6 +169,19 @@ pub fn local_testnet_reader() -> SnapshotReader {
 
     let state_config: StateConfig = serde_json::from_slice(TESTNET_STATE_CONFIG).unwrap();
 
+    for coin in &state_config.coins {
+        let amount = coin.amount;
+        let (address, secret) = match coin.owner {
+            Owner::Address(address) => (address.to_string(), "not provided".to_string()),
+            Owner::SecretKey(secret) => (
+                Address::from(coin.owner.clone()).to_string(),
+                secret.to_string(),
+            ),
+        };
+
+        tracing::info!(amount, address, secret, "Reading genesis coin");
+    }
+
     SnapshotReader::new_in_memory(local_testnet_chain_config(), state_config)
 }
 
@@ -177,8 +194,8 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::cli::{
-        snapshot,
         Fuel,
+        snapshot,
     };
 
     use super::Opt;
@@ -331,8 +348,7 @@ mod tests {
         #[test]
         fn chain_config_is_as_given() {
             // given
-            let line =
-                "./core snapshot --output-directory ./some/path everything --chain ./some/chain/config";
+            let line = "./core snapshot --output-directory ./some/path everything --chain ./some/chain/config";
 
             // when
             let command = parse_cli(line, "")
@@ -427,8 +443,7 @@ mod tests {
         #[test]
         fn group_size_is_configurable() {
             // given
-            let line =
-                "./core snapshot --output-directory dir everything encoding parquet --group-size 101";
+            let line = "./core snapshot --output-directory dir everything encoding parquet --group-size 101";
 
             // when
             let command = parse_cli(line, "")
@@ -479,8 +494,7 @@ mod tests {
         #[test]
         fn can_configure_compression() {
             // given
-            let line =
-                "./core snapshot --output-directory dir everything encoding parquet --compression-level 7";
+            let line = "./core snapshot --output-directory dir everything encoding parquet --compression-level 7";
 
             // when
             let command = parse_cli(line, "")
@@ -527,8 +541,7 @@ mod tests {
         #[test]
         fn json_encoding_doesnt_allow_for_group_size() {
             // given
-            let line =
-                "./core snapshot --output-directory dir everything encoding json --group-size 101";
+            let line = "./core snapshot --output-directory dir everything encoding json --group-size 101";
 
             // when
             let result = parse_cli(line, "");

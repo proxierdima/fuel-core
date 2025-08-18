@@ -1,6 +1,8 @@
 //! This module contains implementations of `TemporalRegistry` for the merkleized indexing tables
+
 use crate::{
     ports::compression_storage::CompressionStorage as CompressionStoragePort,
+    storage,
     storage::{
         evictor_cache::MetadataKey,
         timestamps::{
@@ -16,6 +18,11 @@ use fuel_core_compression::ports::{
     UtxoIdToPointer,
 };
 use fuel_core_storage::{
+    Error as StorageError,
+    StorageAsMut,
+    StorageAsRef,
+    StorageInspect,
+    StorageMutate,
     not_found,
     tables::{
         Coins,
@@ -23,21 +30,28 @@ use fuel_core_storage::{
         Messages,
     },
     transactional::StorageTransaction,
-    StorageAsMut,
-    StorageAsRef,
-    StorageInspect,
 };
 use fuel_core_types::{
+    blockchain::{
+        block::Block,
+        transaction::TransactionExt,
+    },
     fuel_tx::{
-        input::PredicateCode,
         Address,
         AssetId,
         ContractId,
+        Input,
+        Output,
         ScriptCode,
+        TxPointer,
+        UniqueIdentifier,
+        UtxoId,
+        input::PredicateCode,
     },
-    services::executor::Event,
+    fuel_types::ChainId,
     tai64::Tai64,
 };
+use std::collections::HashMap;
 
 /// A wrapper around a mutable reference to the compression storage
 /// reused within both compression context and decompression context
@@ -50,7 +64,58 @@ pub struct CompressionStorageWrapper<'a, CS> {
 /// necessary metadata needed to perform compression
 pub struct CompressionContext<'a, CS> {
     pub(crate) compression_storage: CompressionStorageWrapper<'a, CS>,
-    pub(crate) block_events: &'a [Event],
+    tx_pointers: HashMap<UtxoId, TxPointer>,
+}
+
+impl<'a, CS> CompressionContext<'a, CS> {
+    /// Creates a new compression context
+    pub fn create_from_block(
+        storage_tx: &'a mut StorageTransaction<CS>,
+        block: &'a Block,
+        chain_id: ChainId,
+    ) -> anyhow::Result<Self> {
+        let mut tx_pointers = HashMap::new();
+        for (tx_index, tx) in block.transactions().iter().enumerate() {
+            for input in tx.inputs().iter() {
+                match input {
+                    Input::CoinPredicate(coin) => {
+                        let utxo_id = coin.utxo_id;
+                        let tx_pointer = coin.tx_pointer;
+                        tx_pointers.insert(utxo_id, tx_pointer);
+                    }
+                    Input::CoinSigned(coin) => {
+                        let utxo_id = coin.utxo_id;
+                        let tx_pointer = coin.tx_pointer;
+                        tx_pointers.insert(utxo_id, tx_pointer);
+                    }
+                    _ => {}
+                }
+            }
+            let tx_index = u16::try_from(tx_index)
+                .map_err(|_| anyhow::anyhow!("Transaction index exceeds u16 limit"))?;
+            let tx_id = tx.id(&chain_id);
+            for (index, output) in tx.outputs().iter().enumerate() {
+                let index = u16::try_from(index)
+                    .map_err(|_| anyhow::anyhow!("Output index exceeds u16 limit"))?;
+                match output {
+                    Output::Coin { .. }
+                    | Output::Change { .. }
+                    | Output::Variable { .. } => {
+                        let utxo_id = UtxoId::new(tx_id, index);
+                        let tx_pointer =
+                            TxPointer::new(*block.header().height(), tx_index);
+                        tx_pointers.insert(utxo_id, tx_pointer);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let ctx = Self {
+            compression_storage: CompressionStorageWrapper { storage_tx },
+            tx_pointers,
+        };
+        Ok(ctx)
+    }
 }
 
 /// A wrapper around the compression storage, along with the
@@ -61,12 +126,6 @@ pub struct DecompressionContext<'a, CS, Onchain> {
     /// The mutable reference to the onchain database
     pub onchain_db: Onchain,
 }
-
-use crate::storage;
-use fuel_core_storage::{
-    Error as StorageError,
-    StorageMutate,
-};
 
 macro_rules! impl_temporal_registry {
     ($type:ty) => { paste::paste! {
@@ -264,30 +323,24 @@ impl_temporal_registry!(ContractId);
 impl_temporal_registry!(ScriptCode);
 impl_temporal_registry!(PredicateCode);
 
-impl<'a, CS> UtxoIdToPointer for CompressionContext<'a, CS> {
+impl<CS> UtxoIdToPointer for CompressionContext<'_, CS> {
     fn lookup(
         &self,
-        utxo_id: fuel_core_types::fuel_tx::UtxoId,
+        utxo_id: UtxoId,
     ) -> anyhow::Result<fuel_core_types::fuel_tx::CompressedUtxoId> {
-        for event in self.block_events {
-            match event {
-                Event::CoinCreated(coin) | Event::CoinConsumed(coin)
-                    if coin.utxo_id == utxo_id =>
-                {
-                    let output_index = coin.utxo_id.output_index();
-                    return Ok(fuel_core_types::fuel_tx::CompressedUtxoId {
-                        tx_pointer: coin.tx_pointer,
-                        output_index,
-                    });
-                }
-                _ => {}
-            }
-        }
-        anyhow::bail!("UtxoId not found in the block events");
+        self.tx_pointers
+            .get(&utxo_id)
+            .map(|tx_pointer| fuel_core_types::fuel_tx::CompressedUtxoId {
+                tx_pointer: *tx_pointer,
+                output_index: utxo_id.output_index(),
+            })
+            .ok_or(anyhow::anyhow!(
+                "UTxO Id not found in the compression context"
+            ))
     }
 }
 
-impl<'a, CS, Onchain> HistoryLookup for DecompressionContext<'a, CS, Onchain>
+impl<CS, Onchain> HistoryLookup for DecompressionContext<'_, CS, Onchain>
 where
     Onchain: StorageInspect<Coins, Error = fuel_core_storage::Error>
         + StorageInspect<Messages, Error = fuel_core_storage::Error>
@@ -358,4 +411,130 @@ where
             data: message.data().clone(),
         })
     }
+}
+
+#[cfg(feature = "fault-proving")]
+mod fault_proving {
+    use super::*;
+    use crate::storage::{
+        column::CompressionColumn,
+        {
+            self,
+        },
+    };
+    use fuel_core_storage::{
+        Mappable,
+        MerkleRoot,
+        MerkleRootStorage,
+        blueprint::BlueprintInspect,
+        kv_store::{
+            KeyValueInspect,
+            StorageColumn,
+        },
+        merkle::{
+            column::MerkleizedColumn,
+            sparse::{
+                DummyStorage,
+                Merkleized,
+                MerkleizedTableColumn,
+            },
+        },
+        structured_storage::TableWithBlueprint,
+        transactional::StorageTransaction,
+    };
+
+    trait ComputeRegistryRoot {
+        fn registry_root(&self) -> crate::Result<fuel_core_types::fuel_tx::Bytes32>;
+        fn root_of_table<Table>(&self) -> Result<MerkleRoot, fuel_core_storage::Error>
+        where
+            Table: Mappable + MerkleizedTableColumn<TableColumn = CompressionColumn>,
+            Table: TableWithBlueprint,
+            Table::Blueprint: BlueprintInspect<Table, DummyStorage<MerkleizedColumn<CompressionColumn>>>;
+    }
+
+    impl<Storage> ComputeRegistryRoot for StorageTransaction<Storage>
+    where
+        Storage: KeyValueInspect<
+            Column = MerkleizedColumn<storage::column::CompressionColumn>,
+        >,
+    {
+        fn registry_root(&self) -> crate::Result<fuel_core_types::fuel_tx::Bytes32> {
+            macro_rules! compute_registry_root {
+                ($ty:ty) => {
+                    self.root_of_table::<$ty>().map_err(
+                        crate::errors::CompressionError::FailedToComputeRegistryRoot,
+                    )?
+                };
+            }
+
+            // don't change the order. it is important for backward compatibility.
+            let roots = [
+                compute_registry_root!(storage::address::Address),
+                compute_registry_root!(storage::asset_id::AssetId),
+                compute_registry_root!(storage::contract_id::ContractId),
+                compute_registry_root!(storage::predicate_code::PredicateCode),
+                compute_registry_root!(storage::script_code::ScriptCode),
+                compute_registry_root!(storage::registry_index::RegistryIndex),
+            ];
+
+            let mut hasher = fuel_core_types::fuel_crypto::Hasher::default();
+
+            for root in roots {
+                hasher.input(root);
+            }
+
+            Ok(hasher.finalize())
+        }
+
+        fn root_of_table<Table>(&self) -> Result<MerkleRoot, fuel_core_storage::Error>
+        where
+            Table: Mappable + MerkleizedTableColumn<TableColumn = CompressionColumn>,
+            Table: TableWithBlueprint,
+            Table::Blueprint: BlueprintInspect<Table, DummyStorage<MerkleizedColumn<CompressionColumn>>>,
+        {
+            <Self as MerkleRootStorage<u32, Merkleized<Table>>>::root(
+                self,
+                &Table::column().id(),
+            )
+        }
+    }
+
+    macro_rules! impl_compute_registry_root {
+        ($type:ty $(, $extra_generic:ident)?) => {
+            impl<'a, CS $(, $extra_generic)?> ComputeRegistryRoot for $type
+            where
+                CS: CompressionStoragePort,
+            {
+                fn registry_root(&self) -> crate::Result<fuel_core_types::fuel_tx::Bytes32> {
+                    self.compression_storage.storage_tx.registry_root()
+                }
+
+                fn root_of_table<Table>(&self) -> Result<MerkleRoot, fuel_core_storage::Error>
+                where
+                    Table: Mappable + MerkleizedTableColumn<TableColumn = CompressionColumn>,
+                    Table: TableWithBlueprint,
+                    Table::Blueprint: BlueprintInspect<
+                        Table,
+                        DummyStorage<MerkleizedColumn<CompressionColumn>>,
+                    >,
+                {
+                    self.compression_storage.storage_tx.root_of_table::<Table>()
+                }
+            }
+
+            impl<'a, CS $(, $extra_generic)?> fuel_core_compression::ports::GetRegistryRoot for $type
+            where
+                Self: ComputeRegistryRoot,
+            {
+                type Error = crate::errors::CompressionError;
+
+                fn registry_root(&self) -> crate::Result<fuel_core_types::fuel_tx::Bytes32> {
+                    <Self as ComputeRegistryRoot>::registry_root(self)
+                }
+            }
+        };
+    }
+
+    impl_compute_registry_root!(CompressionContext<'a, CS>);
+    impl_compute_registry_root!(DecompressionContext<'a, CS, Onchain>, Onchain);
 }

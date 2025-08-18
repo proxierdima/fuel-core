@@ -1,4 +1,5 @@
 use crate::{
+    GasPrice,
     ports::{
         self,
         AtomicView,
@@ -12,7 +13,6 @@ use crate::{
         WasmChecker,
         WasmValidityError,
     },
-    GasPrice,
 };
 use fuel_core_services::stream::BoxStream;
 use fuel_core_storage::{
@@ -25,8 +25,8 @@ use fuel_core_storage::{
 };
 use fuel_core_types::{
     blockchain::{
-        header::ConsensusParametersVersion,
         SealedBlock,
+        header::ConsensusParametersVersion,
     },
     entities::{
         coins::coin::CompressedCoin,
@@ -58,20 +58,30 @@ use fuel_core_types::{
             GossipsubMessageInfo,
             PeerId,
         },
-        txpool::TransactionStatus,
+        transaction_status::{
+            PreConfirmationStatus,
+            TransactionStatus,
+            statuses,
+        },
     },
 };
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{
+        HashMap,
+        HashSet,
+    },
     sync::{
         Arc,
         Mutex,
     },
 };
-use tokio::sync::mpsc::{
-    Receiver,
-    Sender,
+use tokio::sync::{
+    broadcast,
+    mpsc::{
+        Receiver,
+        Sender,
+    },
 };
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -81,25 +91,49 @@ pub struct Data {
     pub contracts: HashMap<ContractId, Contract>,
     pub blobs: HashMap<BlobId, BlobBytes>,
     pub messages: HashMap<Nonce, Message>,
+    pub transactions: HashSet<TxId>,
 }
 
 #[derive(Clone)]
 pub struct MockTxStatusManager {
     tx: Sender<(TxId, TransactionStatus)>,
+    tx_preconfirmations_update_sender: broadcast::Sender<(TxId, PreConfirmationStatus)>,
 }
 
 impl MockTxStatusManager {
-    pub fn new(tx: Sender<(TxId, TransactionStatus)>) -> Self {
-        Self { tx }
+    pub fn new(
+        tx_preconfirmations_update_sender: broadcast::Sender<(
+            TxId,
+            PreConfirmationStatus,
+        )>,
+        tx: Sender<(TxId, TransactionStatus)>,
+    ) -> Self {
+        Self {
+            tx_preconfirmations_update_sender,
+            tx,
+        }
     }
 }
 
 impl ports::TxStatusManager for MockTxStatusManager {
     fn status_update(&self, tx_id: TxId, tx_status: TransactionStatus) {
         let tx = self.tx.clone();
-        tokio::spawn(async move {
-            tx.send((tx_id, tx_status)).await.unwrap();
-        });
+        tx.try_send((tx_id, tx_status)).unwrap();
+    }
+
+    fn squeezed_out_txs(&self, statuses: Vec<(TxId, statuses::SqueezedOut)>) {
+        for (tx_id, tx_status) in statuses {
+            self.status_update(tx_id, tx_status.into());
+        }
+    }
+
+    fn preconfirmations_update_listener(
+        &self,
+    ) -> tokio::sync::broadcast::Receiver<(
+        TxId,
+        fuel_core_types::services::transaction_status::PreConfirmationStatus,
+    )> {
+        self.tx_preconfirmations_update_sender.subscribe()
     }
 }
 
@@ -127,6 +161,10 @@ impl MockDb {
 }
 
 impl TxPoolPersistentStorage for MockDb {
+    fn contains_tx(&self, tx_id: &TxId) -> StorageResult<bool> {
+        Ok(self.data.lock().unwrap().transactions.contains(tx_id))
+    }
+
     fn utxo(&self, utxo_id: &UtxoId) -> StorageResult<Option<CompressedCoin>> {
         Ok(self.data.lock().unwrap().coins.get(utxo_id).cloned())
     }
@@ -353,7 +391,7 @@ impl MockImporter {
                 let block = blocks.pop();
                 if let Some(sealed_block) = block {
                     let result: SharedImportResult = Arc::new(
-                        ImportResult::new_from_local(sealed_block, vec![], vec![]),
+                        ImportResult::new_from_local(sealed_block, vec![], vec![]).wrap(),
                     );
 
                     Some((result, blocks))

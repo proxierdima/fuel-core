@@ -9,6 +9,11 @@ use std::{
 
 use fuel_core_types::{
     fuel_tx::{
+        ContractId,
+        Input,
+        Output,
+        TxId,
+        UtxoId,
         input::{
             coin::{
                 CoinPredicate,
@@ -22,11 +27,6 @@ use fuel_core_types::{
                 MessageDataSigned,
             },
         },
-        ContractId,
-        Input,
-        Output,
-        TxId,
-        UtxoId,
     },
     services::txpool::{
         ArcPoolTx,
@@ -49,6 +49,7 @@ use crate::{
     pending_pool::MissingInput,
     ports::TxPoolPersistentStorage,
     selection_algorithms::ratio_tip_gas::RatioTipGasSelectionAlgorithmStorage,
+    spent_inputs::SpentInputs,
     storage::checked_collision::CheckedTransaction,
 };
 
@@ -172,7 +173,9 @@ impl GraphStorage {
 
                 #[cfg(test)]
                 if !nodes_in_queue.insert(dependent) {
-                    panic!("The node is already in the queue for removal. The graph has a cycle.");
+                    panic!(
+                        "The node is already in the queue for removal. The graph has a cycle."
+                    );
                 }
             }
 
@@ -588,6 +591,12 @@ impl Storage for GraphStorage {
                 ));
             }
 
+            if dependency_node.transaction.is_blob() {
+                return Err(Error::Dependency(
+                    DependencyError::NotInsertedDependentOnBlob,
+                ));
+            }
+
             to_check.extend(self.get_direct_dependencies(node_id));
         }
 
@@ -618,6 +627,7 @@ impl Storage for GraphStorage {
         transaction: &PoolTransaction,
         persistent_storage: &impl TxPoolPersistentStorage,
         extracted_outputs: &ExtractedOutputs,
+        spent_inputs: &SpentInputs,
         utxo_validation: bool,
     ) -> Result<(), InputValidationErrorType> {
         let mut missing_inputs = Vec::new();
@@ -656,6 +666,12 @@ impl Storage for GraphStorage {
                             return Err(InputValidationErrorType::Inconsistency(e));
                         };
                     } else if utxo_validation {
+                        if spent_inputs.is_spent_utxo(utxo_id) {
+                            return Err(InputValidationErrorType::Inconsistency(
+                                Error::UtxoInputWasAlreadySpent(*utxo_id),
+                            ));
+                        }
+
                         match persistent_storage.utxo(utxo_id) {
                             Ok(Some(coin)) => {
                                 if !coin
@@ -691,6 +707,12 @@ impl Storage for GraphStorage {
                     // since message id is derived, we don't need to double check all the fields
                     // Maybe this should be on an other function as it's not a dependency finder but just a test
                     if utxo_validation {
+                        if spent_inputs.is_spent_message(nonce) {
+                            return Err(InputValidationErrorType::Inconsistency(
+                                Error::MessageInputWasAlreadySpent(*nonce),
+                            ));
+                        }
+
                         match persistent_storage.message(nonce) {
                             Ok(Some(db_message)) => {
                                 // verify message id integrity
@@ -790,8 +812,8 @@ impl RatioTipGasSelectionAlgorithmStorage for GraphStorage {
 mod tests {
     use super::*;
     use crate::storage::{
-        graph::GraphStorage,
         StorageData,
+        graph::GraphStorage,
     };
     use std::ops::Add;
 

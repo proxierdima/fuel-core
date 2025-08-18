@@ -3,6 +3,8 @@ use crate::client::types::StatusWithTransaction;
 use crate::{
     client::{
         schema::{
+            Tai64Timestamp,
+            TransactionId,
             block::BlockByHeightArgs,
             coins::{
                 ExcludeInput,
@@ -16,10 +18,9 @@ use crate::{
                 DryRunArg,
                 TxWithEstimatedPredicatesArg,
             },
-            Tai64Timestamp,
-            TransactionId,
         },
         types::{
+            RelayedTransactionStatus,
             asset::AssetDetail,
             gas_price::LatestGasPrice,
             message::MessageStatus,
@@ -31,7 +32,6 @@ use crate::{
                 UtxoId,
             },
             upgrades::StateTransitionBytecode,
-            RelayedTransactionStatus,
         },
     },
     reqwest_ext::{
@@ -43,8 +43,8 @@ use crate::{
 use anyhow::Context;
 #[cfg(feature = "subscriptions")]
 use base64::prelude::{
-    Engine as _,
     BASE64_STANDARD,
+    Engine as _,
 };
 #[cfg(feature = "subscriptions")]
 use cynic::StreamingOperation;
@@ -73,9 +73,9 @@ use fuel_core_types::{
     },
     fuel_types::{
         self,
-        canonical::Serialize,
         BlockHeight,
         Nonce,
+        canonical::Serialize,
     },
     services::executor::{
         StorageReadReplayEvent,
@@ -94,6 +94,23 @@ use pagination::{
     PaginationRequest,
 };
 use schema::{
+    Bytes,
+    ContinueTx,
+    ContinueTxArgs,
+    ConversionError,
+    HexString,
+    IdArg,
+    MemoryArgs,
+    RegisterArgs,
+    RunResult,
+    SetBreakpoint,
+    SetBreakpointArgs,
+    SetSingleStepping,
+    SetSingleSteppingArgs,
+    StartTx,
+    StartTxArgs,
+    U32,
+    U64,
     assets::AssetInfoArg,
     balance::BalanceArgs,
     blob::BlobByIdArgs,
@@ -118,23 +135,6 @@ use schema::{
         TxArg,
         TxIdArgs,
     },
-    Bytes,
-    ContinueTx,
-    ContinueTxArgs,
-    ConversionError,
-    HexString,
-    IdArg,
-    MemoryArgs,
-    RegisterArgs,
-    RunResult,
-    SetBreakpoint,
-    SetBreakpointArgs,
-    SetSingleStepping,
-    SetSingleSteppingArgs,
-    StartTx,
-    StartTxArgs,
-    U32,
-    U64,
 };
 #[cfg(feature = "subscriptions")]
 use std::future;
@@ -157,12 +157,12 @@ use std::{
 use tai64::Tai64;
 use tracing as _;
 use types::{
+    TransactionResponse,
+    TransactionStatus,
     assemble_tx::{
         AssembleTransactionResult,
         RequiredBalance,
     },
-    TransactionResponse,
-    TransactionStatus,
 };
 
 use self::schema::{
@@ -463,7 +463,7 @@ impl FuelClient {
     ) -> io::Result<impl futures::Stream<Item = io::Result<ResponseData>> + '_>
     where
         Vars: serde::Serialize,
-        ResponseData: serde::de::DeserializeOwned + 'static,
+        ResponseData: serde::de::DeserializeOwned + 'static + Send,
     {
         use core::ops::Deref;
         use eventsource_client as es;
@@ -533,7 +533,12 @@ impl FuelClient {
 
         let mut last = None;
 
-        let stream = es::Client::stream(&client)
+        enum Event<ResponseData> {
+            Connected,
+            ResponseData(ResponseData),
+        }
+
+        let mut init_stream = es::Client::stream(&client)
             .take_while(|result| {
                 futures::future::ready(!matches!(result, Err(es::Error::Eof)))
             })
@@ -556,7 +561,7 @@ impl FuelClient {
                                             {
                                                 None
                                             }
-                                            _ => Some(Ok(resp)),
+                                            _ => Some(Ok(Event::ResponseData(resp))),
                                         }
                                     }
                                     Err(e) => Some(Err(io::Error::new(
@@ -571,6 +576,7 @@ impl FuelClient {
                             ))),
                         }
                     }
+                    Ok(es::SSE::Connected(_)) => Some(Ok(Event::Connected)),
                     Ok(_) => None,
                     Err(e) => Some(Err(io::Error::new(
                         io::ErrorKind::Other,
@@ -579,6 +585,35 @@ impl FuelClient {
                 };
                 futures::future::ready(r)
             });
+
+        let event = init_stream.next().await;
+        let stream_with_resp = init_stream.filter_map(|result| async move {
+            match result {
+                Ok(Event::Connected) => None,
+                Ok(Event::ResponseData(resp)) => Some(Ok(resp)),
+                Err(error) => Some(Err(error)),
+            }
+        });
+
+        let stream = match event {
+            Some(Ok(Event::Connected)) => {
+                tracing::debug!("Subscription connected");
+                stream_with_resp.boxed()
+            }
+            Some(Ok(Event::ResponseData(resp))) => {
+                tracing::debug!("Subscription returned response");
+                let joined_stream = futures::stream::once(async move { Ok(resp) })
+                    .chain(stream_with_resp);
+                joined_stream.boxed()
+            }
+            Some(Err(e)) => return Err(e),
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Other,
+                    "Subscription stream ended unexpectedly",
+                ));
+            }
+        };
 
         Ok(stream)
     }
@@ -733,6 +768,43 @@ impl FuelClient {
             .collect()
     }
 
+    /// Like `dry_run_opt`, but also returns the storage reads
+    pub async fn dry_run_opt_record_storage_reads(
+        &self,
+        txs: &[Transaction],
+        // Disable utxo input checks (exists, unspent, and valid signature)
+        utxo_validation: Option<bool>,
+        gas_price: Option<u64>,
+        at_height: Option<BlockHeight>,
+    ) -> io::Result<(Vec<TransactionExecutionStatus>, Vec<StorageReadReplayEvent>)> {
+        let txs = txs
+            .iter()
+            .map(|tx| HexString(Bytes(tx.to_bytes())))
+            .collect::<Vec<HexString>>();
+        let query: Operation<schema::tx::DryRunRecordStorageReads, DryRunArg> =
+            schema::tx::DryRunRecordStorageReads::build(DryRunArg {
+                txs,
+                utxo_validation,
+                gas_price: gas_price.map(|gp| gp.into()),
+                block_height: at_height.map(|bh| bh.into()),
+            });
+        let result = self
+            .query(query)
+            .await
+            .map(|r| r.dry_run_record_storage_reads)?;
+        let tx_statuses = result
+            .tx_statuses
+            .into_iter()
+            .map(|tx_status| tx_status.try_into().map_err(Into::into))
+            .collect::<io::Result<Vec<_>>>()?;
+        let storage_reads = result
+            .storage_reads
+            .into_iter()
+            .map(Into::into)
+            .collect::<Vec<_>>();
+        Ok((tx_statuses, storage_reads))
+    }
+
     /// Get storage read replay for a block
     pub async fn storage_read_replay(
         &self,
@@ -766,9 +838,9 @@ impl FuelClient {
     /// - The number of required balances exceeds the maximum number of inputs allowed.
     /// - The fee address index is out of bounds.
     /// - The same asset has multiple change policies(either the receiver of
-    ///     the change is different, or one of the policies states about the destruction
-    ///     of the token while the other does not). The `Change` output from the transaction
-    ///     also count as a `ChangePolicy`.
+    ///   the change is different, or one of the policies states about the destruction
+    ///   of the token while the other does not). The `Change` output from the transaction
+    ///   also count as a `ChangePolicy`.
     /// - The number of excluded coin IDs exceeds the maximum number of inputs allowed.
     /// - Required assets have multiple entries.
     /// - If accounts don't have sufficient amounts to cover the transaction requirements in assets.
@@ -935,26 +1007,29 @@ impl FuelClient {
 
     /// Similar to [`Self::submit_and_await_commit`], but includes all intermediate states.
     #[cfg(feature = "subscriptions")]
-    pub async fn submit_and_await_status<'a>(
-        &'a self,
-        tx: &'a Transaction,
-    ) -> io::Result<impl Stream<Item = io::Result<TransactionStatus>> + 'a> {
-        self.submit_and_await_status_opt(tx, None).await
+    pub async fn submit_and_await_status(
+        &self,
+        tx: &Transaction,
+    ) -> io::Result<impl Stream<Item = io::Result<TransactionStatus>> + '_> {
+        self.submit_and_await_status_opt(tx, None, None).await
     }
 
     /// Similar to [`Self::submit_and_await_commit_opt`], but includes all intermediate states.
     #[cfg(feature = "subscriptions")]
-    pub async fn submit_and_await_status_opt<'a>(
-        &'a self,
-        tx: &'a Transaction,
+    pub async fn submit_and_await_status_opt(
+        &self,
+        tx: &Transaction,
         estimate_predicates: Option<bool>,
-    ) -> io::Result<impl Stream<Item = io::Result<TransactionStatus>> + 'a> {
+        include_preconfirmation: Option<bool>,
+    ) -> io::Result<impl Stream<Item = io::Result<TransactionStatus>> + '_> {
         use cynic::SubscriptionBuilder;
+        use schema::tx::SubmitAndAwaitStatusArg;
         let tx = tx.clone().to_bytes();
         let s = schema::tx::SubmitAndAwaitStatusSubscription::build(
-            TxWithEstimatedPredicatesArg {
+            SubmitAndAwaitStatusArg {
                 tx: HexString(Bytes(tx)),
                 estimate_predicates,
+                include_preconfirmation,
             },
         );
 
@@ -970,10 +1045,10 @@ impl FuelClient {
 
     /// Requests all storage slots for the `contract_id`.
     #[cfg(feature = "subscriptions")]
-    pub async fn contract_storage_slots<'a>(
-        &'a self,
-        contract_id: &'a ContractId,
-    ) -> io::Result<impl Stream<Item = io::Result<(Bytes32, Vec<u8>)>> + 'a> {
+    pub async fn contract_storage_slots(
+        &self,
+        contract_id: &ContractId,
+    ) -> io::Result<impl Stream<Item = io::Result<(Bytes32, Vec<u8>)>> + '_> {
         use cynic::SubscriptionBuilder;
         use schema::storage::ContractStorageSlotsArgs;
         let s = schema::storage::ContractStorageSlots::build(ContractStorageSlotsArgs {
@@ -992,10 +1067,10 @@ impl FuelClient {
 
     /// Requests all storage balances for the `contract_id`.
     #[cfg(feature = "subscriptions")]
-    pub async fn contract_storage_balances<'a>(
-        &'a self,
-        contract_id: &'a ContractId,
-    ) -> io::Result<impl Stream<Item = io::Result<schema::contract::ContractBalance>> + 'a>
+    pub async fn contract_storage_balances(
+        &self,
+        contract_id: &ContractId,
+    ) -> io::Result<impl Stream<Item = io::Result<schema::contract::ContractBalance>> + '_>
     {
         use cynic::SubscriptionBuilder;
         use schema::{
@@ -1012,6 +1087,52 @@ impl FuelClient {
             |result: io::Result<schema::storage::ContractStorageBalances>| {
                 let result: ContractBalance = result?.contract_storage_balances;
                 Result::<_, io::Error>::Ok(result)
+            },
+        );
+
+        Ok(stream)
+    }
+
+    /// Returns a stream of new blocks.
+    #[cfg(feature = "subscriptions")]
+    pub async fn new_blocks_subscription(
+        &self,
+    ) -> io::Result<
+        impl Stream<
+            Item = io::Result<fuel_core_types::services::block_importer::ImportResult>,
+        > + '_,
+    > {
+        use cynic::SubscriptionBuilder;
+        let s = schema::block::NewBlocksSubscription::build(());
+
+        let stream = self.subscribe(s).await?.map(
+            |r: io::Result<schema::block::NewBlocksSubscription>| {
+                let result: fuel_core_types::services::block_importer::ImportResult =
+                    postcard::from_bytes(r?.new_blocks.0.0.as_slice()).map_err(|e| {
+                        io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("Failed to deserialize ImportResult: {e:?}"),
+                        )
+                    })?;
+                Result::<_, io::Error>::Ok(result)
+            },
+        );
+
+        Ok(stream)
+    }
+
+    /// Returns a stream of preconfirmations for all transactions.
+    #[cfg(feature = "subscriptions")]
+    pub async fn preconfirmations_subscription(
+        &self,
+    ) -> io::Result<impl Stream<Item = io::Result<TransactionStatus>> + '_> {
+        use cynic::SubscriptionBuilder;
+        let s = schema::tx::PreconfirmationsSubscription::build(());
+
+        let stream = self.subscribe(s).await?.map(
+            |r: io::Result<schema::tx::PreconfirmationsSubscription>| {
+                let status: TransactionStatus = r?.preconfirmations.try_into()?;
+                Result::<_, io::Error>::Ok(status)
             },
         );
 
@@ -1057,12 +1178,9 @@ impl FuelClient {
             },
         );
 
-        self.query(query).await.map(|r| {
-            r.contract_balance_values
-                .into_iter()
-                .map(Into::into)
-                .collect()
-        })
+        self.query(query)
+            .await
+            .map(|r| r.contract_balance_values.into_iter().collect())
     }
 
     pub async fn start_session(&self) -> io::Result<String> {
@@ -1206,14 +1324,29 @@ impl FuelClient {
 
     #[tracing::instrument(skip(self), level = "debug")]
     #[cfg(feature = "subscriptions")]
+    /// Similar to [`Self::subscribe_transaction_status_opt`], but with default options.
+    pub async fn subscribe_transaction_status(
+        &self,
+        id: &TxId,
+    ) -> io::Result<impl futures::Stream<Item = io::Result<TransactionStatus>> + '_> {
+        self.subscribe_transaction_status_opt(id, None).await
+    }
+
+    #[cfg(feature = "subscriptions")]
     /// Subscribe to the status of a transaction
-    pub async fn subscribe_transaction_status<'a>(
-        &'a self,
-        id: &'a TxId,
-    ) -> io::Result<impl futures::Stream<Item = io::Result<TransactionStatus>> + 'a> {
+    pub async fn subscribe_transaction_status_opt(
+        &self,
+        id: &TxId,
+        include_preconfirmation: Option<bool>,
+    ) -> io::Result<impl Stream<Item = io::Result<TransactionStatus>> + '_> {
         use cynic::SubscriptionBuilder;
+        use schema::tx::StatusChangeSubscriptionArgs;
         let tx_id: TransactionId = (*id).into();
-        let s = schema::tx::StatusChangeSubscription::build(TxIdArgs { id: tx_id });
+        let s =
+            schema::tx::StatusChangeSubscription::build(StatusChangeSubscriptionArgs {
+                id: tx_id,
+                include_preconfirmation,
+            });
 
         tracing::debug!("subscribing");
         let stream = self.subscribe(s).await?.map(|tx| {
@@ -1434,10 +1567,7 @@ impl FuelClient {
         request: PaginationRequest<String>,
     ) -> io::Result<PaginatedResult<types::Coin, String>> {
         let owner: schema::Address = (*owner).into();
-        let asset_id: schema::AssetId = match asset_id {
-            Some(asset_id) => (*asset_id).into(),
-            None => schema::AssetId::default(),
-        };
+        let asset_id = asset_id.map(|id| (*id).into());
         let args = CoinsConnectionArgs::from((owner, asset_id, request));
         let query = schema::coins::CoinsQuery::build(args);
 
@@ -1512,7 +1642,7 @@ impl FuelClient {
         &self,
         owner: &Address,
         asset_id: Option<&AssetId>,
-    ) -> io::Result<u64> {
+    ) -> io::Result<u128> {
         let owner: schema::Address = (*owner).into();
         let asset_id: schema::AssetId = match asset_id {
             Some(asset_id) => (*asset_id).into(),
@@ -1520,7 +1650,7 @@ impl FuelClient {
         };
         let query = schema::balance::BalanceQuery::build(BalanceArgs { owner, asset_id });
         let balance: types::Balance = self.query(query).await?.balance.into();
-        Ok(balance.amount.try_into().unwrap_or(u64::MAX))
+        Ok(balance.amount)
     }
 
     // Retrieve a page of balances by their owner
@@ -1635,11 +1765,14 @@ impl FuelClient {
         Ok(status)
     }
 
-    pub async fn asset_info(&self, asset_id: &AssetId) -> io::Result<AssetDetail> {
+    pub async fn asset_info(
+        &self,
+        asset_id: &AssetId,
+    ) -> io::Result<Option<AssetDetail>> {
         let query = schema::assets::AssetInfoQuery::build(AssetInfoArg {
             id: (*asset_id).into(),
         });
-        let asset_info = self.query(query).await?.asset_details.into();
+        let asset_info = self.query(query).await?.asset_details.map(Into::into);
         Ok(asset_info)
     }
 }

@@ -5,7 +5,7 @@ use std::{
 
 use fuel_core_types::{
     fuel_tx::Bytes32,
-    services::txpool::TransactionStatus,
+    services::transaction_status::TransactionStatus,
 };
 use proptest::{
     prelude::*,
@@ -80,13 +80,13 @@ pub(super) fn state_strategy() -> impl Strategy<Value = State> {
     ]
 }
 
-pub(super) fn senders_strategy_all_ok(
-) -> impl Strategy<Value = HashMap<Bytes32, Vec<Sender<(), MockSendStatus>>>> {
+pub(super) fn senders_strategy_all_ok()
+-> impl Strategy<Value = HashMap<Bytes32, Vec<Sender<(), MockSendStatus>>>> {
     senders_strategy(Just(TrySend::Ok))
 }
 
-pub(super) fn senders_strategy_any(
-) -> impl Strategy<Value = HashMap<Bytes32, Vec<Sender<(), MockSendStatus>>>> {
+pub(super) fn senders_strategy_any()
+-> impl Strategy<Value = HashMap<Bytes32, Vec<Sender<(), MockSendStatus>>>> {
     senders_strategy(any::<TrySend>())
 }
 

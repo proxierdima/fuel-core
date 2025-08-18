@@ -6,7 +6,6 @@
 #![deny(warnings)]
 
 pub mod config;
-mod error;
 mod manager;
 pub mod ports;
 pub mod service;
@@ -15,11 +14,10 @@ mod tx_status_stream;
 mod update_sender;
 pub mod utils;
 
-pub use manager::TxStatusManager;
 pub use service::{
-    new_service,
     SharedData,
     Task,
+    new_service,
 };
 pub use tx_status_stream::{
     TxStatusMessage,

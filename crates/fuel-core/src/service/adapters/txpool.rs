@@ -4,19 +4,20 @@ use crate::{
         BlockImporterAdapter,
         ChainStateInfoProvider,
         P2PAdapter,
+        PreconfirmationSender,
         StaticGasPrice,
-        TxStatusManagerAdapter,
     },
 };
 use fuel_core_services::stream::BoxStream;
 use fuel_core_storage::{
+    Result as StorageResult,
+    StorageAsRef,
     tables::{
         Coins,
         ContractsRawCode,
         Messages,
+        ProcessedTransactions,
     },
-    Result as StorageResult,
-    StorageAsRef,
 };
 use fuel_core_txpool::ports::{
     BlockImporter,
@@ -50,10 +51,19 @@ use fuel_core_types::{
             PeerId,
             TransactionGossipData,
         },
-        txpool::TransactionStatus,
+        preconfirmation::{
+            Preconfirmation,
+            PreconfirmationStatus,
+        },
+        transaction_status::{
+            PreConfirmationStatus,
+            TransactionStatus,
+            statuses,
+        },
     },
 };
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 impl BlockImporter for BlockImporterAdapter {
     fn block_events(&self) -> BoxStream<SharedImportResult> {
@@ -65,10 +75,9 @@ impl BlockImporter for BlockImporterAdapter {
 #[async_trait::async_trait]
 impl fuel_core_txpool::ports::NotifyP2P for P2PAdapter {
     fn broadcast_transaction(&self, transaction: Arc<Transaction>) -> anyhow::Result<()> {
-        if let Some(service) = &self.service {
-            service.broadcast_transaction(transaction)
-        } else {
-            Ok(())
+        match &self.service {
+            Some(service) => service.broadcast_transaction(transaction),
+            _ => Ok(()),
         }
     }
 
@@ -77,10 +86,11 @@ impl fuel_core_txpool::ports::NotifyP2P for P2PAdapter {
         message_info: GossipsubMessageInfo,
         validity: GossipsubMessageAcceptance,
     ) -> anyhow::Result<()> {
-        if let Some(service) = &self.service {
-            service.notify_gossip_transaction_validity(message_info, validity)
-        } else {
-            Ok(())
+        match &self.service {
+            Some(service) => {
+                service.notify_gossip_transaction_validity(message_info, validity)
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -91,31 +101,31 @@ impl fuel_core_txpool::ports::P2PSubscriptions for P2PAdapter {
 
     fn gossiped_transaction_events(&self) -> BoxStream<Self::GossipedTransaction> {
         use tokio_stream::{
-            wrappers::BroadcastStream,
             StreamExt,
+            wrappers::BroadcastStream,
         };
-        if let Some(service) = &self.service {
-            Box::pin(
+        match &self.service {
+            Some(service) => Box::pin(
                 BroadcastStream::new(service.subscribe_tx())
                     .filter_map(|result| result.ok()),
-            )
-        } else {
-            fuel_core_services::stream::IntoBoxStream::into_boxed(tokio_stream::pending())
+            ),
+            _ => fuel_core_services::stream::IntoBoxStream::into_boxed(
+                tokio_stream::pending(),
+            ),
         }
     }
 
     fn subscribe_new_peers(&self) -> BoxStream<PeerId> {
         use tokio_stream::{
-            wrappers::BroadcastStream,
             StreamExt,
+            wrappers::BroadcastStream,
         };
-        if let Some(service) = &self.service {
-            Box::pin(
+        match &self.service {
+            Some(service) => Box::pin(
                 BroadcastStream::new(service.subscribe_new_peers())
                     .filter_map(|result| result.ok()),
-            )
-        } else {
-            Box::pin(fuel_core_services::stream::pending())
+            ),
+            _ => Box::pin(fuel_core_services::stream::pending()),
         }
     }
 }
@@ -124,10 +134,9 @@ impl fuel_core_txpool::ports::P2PSubscriptions for P2PAdapter {
 #[async_trait::async_trait]
 impl fuel_core_txpool::ports::P2PRequests for P2PAdapter {
     async fn request_tx_ids(&self, peer_id: PeerId) -> anyhow::Result<Vec<TxId>> {
-        if let Some(service) = &self.service {
-            service.get_all_transactions_ids_from_peer(peer_id).await
-        } else {
-            Ok(vec![])
+        match &self.service {
+            Some(service) => service.get_all_transactions_ids_from_peer(peer_id).await,
+            _ => Ok(vec![]),
         }
     }
 
@@ -136,12 +145,13 @@ impl fuel_core_txpool::ports::P2PRequests for P2PAdapter {
         peer_id: PeerId,
         tx_ids: Vec<TxId>,
     ) -> anyhow::Result<Vec<Option<Transaction>>> {
-        if let Some(service) = &self.service {
-            service
-                .get_full_transactions_from_peer(peer_id, tx_ids)
-                .await
-        } else {
-            Ok(vec![])
+        match &self.service {
+            Some(service) => {
+                service
+                    .get_full_transactions_from_peer(peer_id, tx_ids)
+                    .await
+            }
+            _ => Ok(vec![]),
         }
     }
 }
@@ -195,6 +205,10 @@ const _: () = {
 };
 
 impl fuel_core_txpool::ports::TxPoolPersistentStorage for OnChainIterableKeyValueView {
+    fn contains_tx(&self, tx_id: &TxId) -> StorageResult<bool> {
+        self.storage::<ProcessedTransactions>().contains_key(tx_id)
+    }
+
     fn utxo(&self, utxo_id: &UtxoId) -> StorageResult<Option<CompressedCoin>> {
         self.storage::<Coins>()
             .get(utxo_id)
@@ -231,9 +245,47 @@ impl ChainStateInfoProviderTrait for ChainStateInfoProvider {
     }
 }
 
-impl TxStatusManager for TxStatusManagerAdapter {
+impl TxStatusManager for PreconfirmationSender {
     fn status_update(&self, tx_id: TxId, tx_status: TransactionStatus) {
-        self.tx_status_manager_shared_data
+        let permit = self.sender_signature_service.try_reserve();
+
+        if let Ok(permit) = permit {
+            if let TransactionStatus::SqueezedOut(status) = &tx_status {
+                let preconfirmation = Preconfirmation {
+                    tx_id,
+                    status: PreconfirmationStatus::SqueezedOut {
+                        reason: status.reason.clone(),
+                    },
+                };
+                permit.send(vec![preconfirmation]);
+            }
+        }
+
+        self.tx_status_manager_adapter
             .update_status(tx_id, tx_status);
+    }
+
+    fn preconfirmations_update_listener(
+        &self,
+    ) -> broadcast::Receiver<(TxId, PreConfirmationStatus)> {
+        self.tx_status_manager_adapter
+            .preconfirmations_update_listener()
+    }
+
+    fn squeezed_out_txs(&self, statuses: Vec<(TxId, statuses::SqueezedOut)>) {
+        let permit = self.sender_signature_service.try_reserve();
+        if let Ok(permit) = permit {
+            let preconfirmations = statuses
+                .iter()
+                .map(|(tx_id, status)| Preconfirmation {
+                    tx_id: *tx_id,
+                    status: PreconfirmationStatus::SqueezedOut {
+                        reason: status.reason.clone(),
+                    },
+                })
+                .collect();
+            permit.send(preconfirmations);
+        }
+        self.tx_status_manager_adapter.update_statuses(statuses);
     }
 }

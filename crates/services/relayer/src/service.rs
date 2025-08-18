@@ -1,10 +1,10 @@
 //! This module handles bridge communications between the fuel node and the data availability layer.
 
 use crate::{
+    Config,
     log::EthEventLog,
     ports::RelayerDb,
     service::state::EthLocal,
-    Config,
 };
 use async_trait::async_trait;
 use core::time::Duration;
@@ -264,15 +264,16 @@ where
             .await;
         }
 
-        if let Err(err) = result {
-            if !self.retry_on_error {
-                tracing::error!("Exiting due to Error in relayer task: {}", err);
-                TaskNextAction::Stop
-            } else {
-                TaskNextAction::ErrorContinue(err)
+        match result {
+            Err(err) => {
+                if !self.retry_on_error {
+                    tracing::error!("Exiting due to Error in relayer task: {}", err);
+                    TaskNextAction::Stop
+                } else {
+                    TaskNextAction::ErrorContinue(err)
+                }
             }
-        } else {
-            TaskNextAction::Continue
+            _ => TaskNextAction::Continue,
         }
     }
 
@@ -344,7 +345,7 @@ where
                 Err(anyhow::anyhow!("The relayer got a stop signal"))
             },
             block = self.eth_node.get_block(ethers_core::types::BlockNumber::Finalized) => {
-                let block_number = block.map_err(anyhow::Error::msg)?
+                let block_number = block.map_err(|err| anyhow::anyhow!("failed to get block from Eth node: {err:?}"))?
                     .and_then(|block| block.number)
                     .ok_or(anyhow::anyhow!("Block pending"))?
                     .as_u64();

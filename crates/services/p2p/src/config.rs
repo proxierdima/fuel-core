@@ -1,8 +1,8 @@
 use crate::{
+    TryPeerId,
     gossipsub::config::default_gossipsub_config,
     heartbeat,
     peer_manager::ConnectionState,
-    TryPeerId,
 };
 use fuel_core_types::blockchain::consensus::Genesis;
 
@@ -13,14 +13,14 @@ use self::{
 };
 use fuel_core_services::seqlock::SeqLockReader;
 use libp2p::{
-    gossipsub,
-    identity::{
-        secp256k1,
-        Keypair,
-    },
-    noise,
     Multiaddr,
     PeerId,
+    gossipsub,
+    identity::{
+        Keypair,
+        secp256k1,
+    },
+    noise,
 };
 use std::{
     collections::HashSet,
@@ -28,7 +28,10 @@ use std::{
         IpAddr,
         Ipv4Addr,
     },
-    num::NonZeroU32,
+    num::{
+        NonZeroU32,
+        NonZeroUsize,
+    },
     time::Duration,
 };
 
@@ -42,8 +45,7 @@ const REQ_RES_TIMEOUT: Duration = Duration::from_secs(20);
 /// The configuration of the ingress should be the same:
 /// - `nginx.org/client-max-body-size`
 /// - `nginx.ingress.kubernetes.io/proxy-body-size`
-pub const MAX_RESPONSE_SIZE: NonZeroU32 =
-    unsafe { NonZeroU32::new_unchecked(50 * 1024 * 1024) };
+pub const MAX_RESPONSE_SIZE: NonZeroU32 = NonZeroU32::new(260 * 1024 * 1024).unwrap();
 
 /// Maximum number of blocks per request.
 pub const MAX_HEADERS_PER_REQUEST: usize = 100;
@@ -149,6 +151,9 @@ pub struct Config<State = Initialized> {
 
     /// If true, the node will subscribe to pre-confirmations topic
     pub subscribe_to_pre_confirmations: bool,
+
+    /// The cache size for the p2p req/res protocol
+    pub cache_size: Option<NonZeroUsize>,
 }
 
 /// The initialized state can be achieved only by the `init` function because `()` is private.
@@ -199,6 +204,7 @@ impl Config<NotInitialized> {
             tx_pool_threads: self.tx_pool_threads,
             state: Initialized(()),
             subscribe_to_pre_confirmations: self.subscribe_to_pre_confirmations,
+            cache_size: self.cache_size,
         })
     }
 }
@@ -253,7 +259,8 @@ impl Config<NotInitialized> {
             database_read_threads: 0,
             tx_pool_threads: 0,
             state: NotInitialized,
-            subscribe_to_pre_confirmations: false,
+            subscribe_to_pre_confirmations: true,
+            cache_size: None,
         }
     }
 }

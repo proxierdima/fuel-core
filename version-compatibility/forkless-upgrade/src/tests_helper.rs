@@ -1,20 +1,22 @@
 #![allow(dead_code)]
+use latest_fuel_core_type::{
+    fuel_crypto::{
+        SecretKey,
+        fuel_types::ChainId,
+    },
+    fuel_tx::{
+        Input,
+        Signable,
+        Transaction,
+        Upgrade,
+        UpgradePurpose,
+        Upload,
+        UploadSubsection,
+        Witness,
+        policies::Policies,
+    },
+};
 
-use fuel_crypto::{
-    fuel_types::ChainId,
-    SecretKey,
-};
-use fuel_tx::{
-    policies::Policies,
-    Input,
-    Signable,
-    Transaction,
-    Upgrade,
-    UpgradePurpose,
-    Upload,
-    UploadSubsection,
-    Witness,
-};
 use genesis_fuel_core_bin::FuelService as GenesisFuelService;
 use genesis_fuel_core_client::client::FuelClient as GenesisClient;
 use genesis_fuel_core_services::Service as _;
@@ -22,21 +24,21 @@ use latest_fuel_core_bin::FuelService as LatestFuelService;
 use latest_fuel_core_client::client::FuelClient as LatestClient;
 use libp2p::PeerId;
 use rand::{
-    prelude::StdRng,
     Rng,
+    prelude::StdRng,
 };
 use std::str::FromStr;
-use version_36_fuel_core_bin::FuelService as Version36FuelService;
-use version_36_fuel_core_client::client::FuelClient as Version36Client;
-use version_36_fuel_core_services as _;
+use version_44_fuel_core_bin::FuelService as Version44FuelService;
+use version_44_fuel_core_client::client::FuelClient as Version44Client;
+use version_44_fuel_core_services as _;
 
 // Awful version compatibility hack.
 // `$bin_crate::cli::run::get_service` is async in the later versions of fuel-core-bin.
 macro_rules! maybe_await {
-    (true, $expr:expr) => {
+    (true, $expr:expr_2021) => {
         $expr.await
     };
-    (false, $expr:expr) => {
+    (false, $expr:expr_2021) => {
         $expr
     };
 }
@@ -101,14 +103,14 @@ define_core_driver!(
 );
 
 define_core_driver!(
-    version_36_fuel_core_bin,
-    Version36FuelService,
-    Version36Client,
-    Version36FuelCoreDriver,
+    version_44_fuel_core_bin,
+    Version44FuelService,
+    Version44Client,
+    Version44FuelCoreDriver,
     true
 );
 
-impl Version36FuelCoreDriver {
+impl Version44FuelCoreDriver {
     pub async fn kill(self) -> tempfile::TempDir {
         self.node
             .send_stop_signal_and_await_shutdown()
@@ -137,7 +139,8 @@ impl LatestFuelCoreDriver {
 }
 
 pub const IGNITION_TESTNET_SNAPSHOT: &str = "./chain-configurations/ignition";
-pub const V36_TESTNET_SNAPSHOT: &str = "./chain-configurations/v36";
+
+pub const V44_TESTNET_SNAPSHOT: &str = "./chain-configurations/v44";
 pub const POA_SECRET_KEY: &str =
     "e3d6eb39607650e22f0befa26d52e921d2e7924d0e165f38ffa8d9d0ac73de93";
 pub const PRIVILEGED_ADDRESS_KEY: &str =
@@ -155,7 +158,7 @@ pub fn valid_input(secret_key: &SecretKey, rng: &mut StdRng, amount: u64) -> Inp
     let pk = secret_key.public_key();
     let owner = Input::owner(&pk);
     Input::coin_signed(
-        rng.gen(),
+        rng.r#gen(),
         owner,
         amount,
         BASE_ASSET_ID.parse().unwrap(),

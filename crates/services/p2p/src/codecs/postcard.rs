@@ -1,8 +1,8 @@
 use super::{
-    gossipsub::GossipsubMessageHandler,
-    request_response::RequestResponseMessageHandler,
     Decode,
     Encode,
+    gossipsub::GossipsubMessageHandler,
+    request_response::RequestResponseMessageHandler,
 };
 
 use std::{
@@ -63,7 +63,11 @@ where
 #[cfg(test)]
 #[allow(non_snake_case)]
 mod tests {
-    use fuel_core_types::blockchain::SealedBlockHeader;
+    use fuel_core_types::{
+        blockchain::SealedBlockHeader,
+        fuel_tx::Transaction,
+        services::p2p::NetworkableTransactionPool,
+    };
     use libp2p::request_response::Codec;
 
     use super::*;
@@ -80,7 +84,7 @@ mod tests {
         },
     };
 
-    const MAX_REQUEST_SIZE: NonZeroU32 = unsafe { NonZeroU32::new_unchecked(1024) };
+    const MAX_REQUEST_SIZE: NonZeroU32 = NonZeroU32::new(1024).unwrap();
 
     #[test]
     fn test_request_size_fits() {
@@ -92,8 +96,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codec__serialization_roundtrip_using_v2_on_successful_response_returns_original_value(
-    ) {
+    async fn codec__serialization_roundtrip_using_v2_on_successful_response_returns_original_value__sealed_headers()
+     {
         // Given
         let sealed_block_headers = vec![SealedBlockHeader::default()];
         let response = V2ResponseMessage::SealedHeaders(Ok(sealed_block_headers.clone()));
@@ -120,8 +124,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codec__serialization_roundtrip_using_v1_on_successful_response_returns_original_value(
-    ) {
+    async fn codec__serialization_roundtrip_using_v2_on_successful_response_returns_original_value__full_transactions()
+     {
+        // Given
+        let full_transactions = vec![Some(NetworkableTransactionPool::Transaction(
+            Transaction::default_test_tx(),
+        ))];
+        let response =
+            V2ResponseMessage::TxPoolFullTransactions(Ok(full_transactions.clone()));
+        let mut codec: RequestResponseMessageHandler<PostcardCodec> =
+            RequestResponseMessageHandler::new(MAX_REQUEST_SIZE);
+        let mut buf = Vec::with_capacity(1024);
+
+        // When
+        codec
+            .write_response(&RequestResponseProtocol::V2, &mut buf, response)
+            .await
+            .expect("Valid full transactions should be serialized using v2");
+
+        let deserialized = codec
+            .read_response(&RequestResponseProtocol::V2, &mut buf.as_slice())
+            .await
+            .expect("Valid full transactions should be deserialized using v2");
+
+        // Then
+        assert!(matches!(
+            deserialized,
+            V2ResponseMessage::TxPoolFullTransactions(Ok(actual)) if actual == full_transactions
+        ));
+    }
+
+    #[tokio::test]
+    async fn codec__serialization_roundtrip_using_v1_on_successful_response_returns_original_value()
+     {
         // Given
         let sealed_block_headers = vec![SealedBlockHeader::default()];
         let response = V2ResponseMessage::SealedHeaders(Ok(sealed_block_headers.clone()));
@@ -147,8 +182,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codec__serialization_roundtrip_using_v2_on_error_response_returns_original_value(
-    ) {
+    async fn codec__serialization_roundtrip_using_v2_on_error_response_returns_original_value()
+     {
         // Given
         let response = V2ResponseMessage::SealedHeaders(Err(
             ResponseMessageErrorCode::ProtocolV1EmptyResponse,
@@ -178,8 +213,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codec__serialization_roundtrip_using_v1_on_error_response_returns_predefined_error_code(
-    ) {
+    async fn codec__serialization_roundtrip_using_v1_on_error_response_returns_predefined_error_code()
+     {
         // Given
         let response = V2ResponseMessage::SealedHeaders(Err(
             ResponseMessageErrorCode::RequestedRangeTooLarge,

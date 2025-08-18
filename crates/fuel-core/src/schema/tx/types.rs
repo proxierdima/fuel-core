@@ -1,18 +1,19 @@
 use super::{
+    ContextExt,
     input::Input,
     output::Output,
     receipt::Receipt,
-    ContextExt,
 };
 use crate::{
     fuel_core_graphql_api::{
+        IntoApiResult,
         api_service::ChainInfoProvider,
         database::ReadView,
         query_costs,
-        IntoApiResult,
     },
     graphql_api::api_service::DynTxStatusManager,
     schema::{
+        ReadViewProvider,
         block::Block,
         scalars::{
             AssetId,
@@ -31,9 +32,9 @@ use crate::{
         tx::{
             input,
             output,
+            output::ResolvedOutput,
             upgrade_purpose::UpgradePurpose,
         },
-        ReadViewProvider,
     },
 };
 use async_graphql::{
@@ -46,6 +47,8 @@ use fuel_core_storage::Error as StorageError;
 use fuel_core_types::{
     fuel_tx::{
         self,
+        Executable,
+        TxId,
         field::{
             BytecodeRoot,
             BytecodeWitnessIndex,
@@ -73,8 +76,6 @@ use fuel_core_types::{
             Witnesses,
         },
         policies::PolicyType,
-        Executable,
-        TxId,
     },
     fuel_types::canonical::Serialize,
     fuel_vm::ProgramState as VmProgramState,
@@ -83,7 +84,7 @@ use fuel_core_types::{
             TransactionExecutionResult,
             TransactionExecutionStatus,
         },
-        txpool::{
+        transaction_status::{
             self,
             TransactionStatus as TxStatus,
         },
@@ -163,7 +164,7 @@ impl SubmittedStatus {
 #[derive(Debug)]
 pub struct SuccessStatus {
     tx_id: TxId,
-    status: Arc<txpool::statuses::Success>,
+    status: Arc<transaction_status::statuses::Success>,
 }
 
 #[Object]
@@ -214,7 +215,7 @@ impl SuccessStatus {
 #[derive(Debug)]
 pub struct PreconfirmationSuccessStatus {
     pub tx_id: TxId,
-    pub status: Arc<txpool::statuses::PreConfirmationSuccess>,
+    pub status: Arc<transaction_status::statuses::PreConfirmationSuccess>,
 }
 
 #[Object]
@@ -255,12 +256,14 @@ impl PreconfirmationSuccessStatus {
         Ok(receipts)
     }
 
-    async fn resolved_outputs(&self) -> async_graphql::Result<Option<Vec<Output>>> {
+    async fn resolved_outputs(
+        &self,
+    ) -> async_graphql::Result<Option<Vec<ResolvedOutput>>> {
         let outputs = self
             .status
-            .outputs
+            .resolved_outputs
             .as_ref()
-            .map(|outputs| outputs.iter().map(Into::into).collect());
+            .map(|outputs| outputs.iter().map(|&x| x.into()).collect());
         Ok(outputs)
     }
 }
@@ -268,7 +271,7 @@ impl PreconfirmationSuccessStatus {
 #[derive(Debug)]
 pub struct FailureStatus {
     tx_id: TxId,
-    status: Arc<txpool::statuses::Failure>,
+    status: Arc<transaction_status::statuses::Failure>,
 }
 
 #[Object]
@@ -326,7 +329,7 @@ impl FailureStatus {
 #[derive(Debug)]
 pub struct PreconfirmationFailureStatus {
     pub tx_id: TxId,
-    pub status: Arc<txpool::statuses::PreConfirmationFailure>,
+    pub status: Arc<transaction_status::statuses::PreConfirmationFailure>,
 }
 
 #[Object]
@@ -371,12 +374,14 @@ impl PreconfirmationFailureStatus {
         Ok(receipts)
     }
 
-    async fn resolved_outputs(&self) -> async_graphql::Result<Option<Vec<Output>>> {
+    async fn resolved_outputs(
+        &self,
+    ) -> async_graphql::Result<Option<Vec<ResolvedOutput>>> {
         let outputs = self
             .status
-            .outputs
+            .resolved_outputs
             .as_ref()
-            .map(|outputs| outputs.iter().map(Into::into).collect());
+            .map(|outputs| outputs.iter().map(|&x| x.into()).collect());
         Ok(outputs)
     }
 }
@@ -384,7 +389,7 @@ impl PreconfirmationFailureStatus {
 #[derive(Debug)]
 pub struct SqueezedOutStatus {
     pub tx_id: TxId,
-    pub status: Arc<txpool::statuses::SqueezedOut>,
+    pub status: Arc<transaction_status::statuses::SqueezedOut>,
 }
 
 #[Object]
@@ -443,6 +448,14 @@ impl TransactionStatus {
             | TransactionStatus::PreconfirmationSuccess(_)
             | TransactionStatus::PreconfirmationFailure(_) => false,
         }
+    }
+
+    pub fn is_preconfirmation(&self) -> bool {
+        matches!(
+            self,
+            TransactionStatus::PreconfirmationSuccess(_)
+                | TransactionStatus::PreconfirmationFailure(_)
+        )
     }
 }
 
@@ -764,15 +777,22 @@ impl Transaction {
     async fn status(
         &self,
         ctx: &Context<'_>,
+        include_preconfirmation: Option<bool>,
     ) -> async_graphql::Result<Option<TransactionStatus>> {
         let id = self.1;
         let query = ctx.read_view()?;
 
         let tx_status_manager = ctx.data_unchecked::<DynTxStatusManager>();
 
-        get_tx_status(id, query.as_ref(), tx_status_manager)
-            .await
-            .map_err(Into::into)
+        get_tx_status(
+            &id,
+            query.as_ref(),
+            tx_status_manager,
+            include_preconfirmation.unwrap_or(false),
+        )
+        .await
+        .map(|status| status.map(|status| TransactionStatus::new(id, status)))
+        .map_err(Into::into)
     }
 
     async fn script(&self) -> Option<HexString> {
@@ -1037,6 +1057,7 @@ impl DryRunFailureStatus {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct DryRunTransactionExecutionStatus(pub TransactionExecutionStatus);
 
 #[Object]
@@ -1054,6 +1075,23 @@ impl DryRunTransactionExecutionStatus {
     }
 }
 
+pub struct DryRunStorageReads {
+    pub tx_statuses: Vec<DryRunTransactionExecutionStatus>,
+    pub storage_reads: Vec<StorageReadReplayEvent>,
+}
+
+#[Object]
+impl DryRunStorageReads {
+    async fn tx_statuses(&self) -> &[DryRunTransactionExecutionStatus] {
+        &self.tx_statuses
+    }
+
+    async fn storage_reads(&self) -> &[StorageReadReplayEvent] {
+        &self.storage_reads
+    }
+}
+
+#[derive(Clone)]
 pub struct StorageReadReplayEvent {
     column: U32,
     key: HexString,
@@ -1089,22 +1127,34 @@ impl StorageReadReplayEvent {
 
 #[tracing::instrument(level = "debug", skip(query, tx_status_manager), ret, err)]
 pub(crate) async fn get_tx_status(
-    id: fuel_core_types::fuel_types::Bytes32,
+    id: &fuel_core_types::fuel_types::Bytes32,
     query: &ReadView,
     tx_status_manager: &DynTxStatusManager,
-) -> Result<Option<TransactionStatus>, StorageError> {
+    include_preconfirmation: bool,
+) -> Result<Option<transaction_status::TransactionStatus>, StorageError> {
     let api_result = query
-        .tx_status(&id)
-        .into_api_result::<txpool::TransactionStatus, StorageError>()?;
+        .tx_status(id)
+        .into_api_result::<transaction_status::TransactionStatus, StorageError>()?;
     match api_result {
-        Some(status) => {
-            let status = TransactionStatus::new(id, status);
-            Ok(Some(status))
-        }
+        Some(status) => Ok(Some(status)),
         None => {
-            let status = tx_status_manager.status(id).await?;
+            let status = tx_status_manager.status(*id).await?;
             match status {
-                Some(status) => Ok(Some(TransactionStatus::new(id, status))),
+                Some(status) => {
+                    // Filter out preconfirmation statuses if not allowed. Converting to submitted status
+                    // because it's the closest to the preconfirmation status.
+                    // Having `now()` as timestamp isn't ideal but shouldn't cause much inconsistency.
+                    if !include_preconfirmation
+                        && status.is_preconfirmation()
+                        && !status.is_final()
+                    {
+                        Ok(Some(transaction_status::TransactionStatus::submitted(
+                            Tai64::now(),
+                        )))
+                    } else {
+                        Ok(Some(status))
+                    }
+                }
                 None => Ok(None),
             }
         }

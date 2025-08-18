@@ -4,7 +4,6 @@ use crate::{
     config::Config,
     storage_access_recorder::StorageAccessRecorder,
 };
-
 use fuel_core_executor::{
     executor::{
         ExecutionInstance,
@@ -30,29 +29,27 @@ use fuel_core_storage::{
         Modifiable,
     },
 };
-#[cfg(feature = "wasm-executor")]
-use fuel_core_types::fuel_types::Bytes32;
 use fuel_core_types::{
     blockchain::{
         block::Block,
         header::{
-            StateTransitionBytecodeVersion,
             LATEST_STATE_TRANSITION_VERSION,
+            StateTransitionBytecodeVersion,
         },
     },
     fuel_tx::Transaction,
     fuel_types::BlockHeight,
     services::{
+        Uncommitted,
         block_producer::Components,
         executor::{
+            DryRunResult,
             Error as ExecutorError,
             ExecutionResult,
             Result as ExecutorResult,
             StorageReadReplayEvent,
-            TransactionExecutionStatus,
             ValidationResult,
         },
-        Uncommitted,
     },
 };
 use futures::FutureExt;
@@ -60,23 +57,34 @@ use std::sync::Arc;
 
 #[cfg(feature = "wasm-executor")]
 use fuel_core_storage::{
+    StorageAsRef,
     not_found,
     structured_storage::StructuredStorage,
     tables::{
         StateTransitionBytecodeVersions,
         UploadedBytecodes,
     },
-    StorageAsRef,
 };
 #[cfg(any(test, feature = "test-helpers"))]
 use fuel_core_types::blockchain::block::PartialFuelBlock;
 #[cfg(any(test, feature = "test-helpers"))]
 use fuel_core_types::services::executor::UncommittedResult;
+
+#[cfg(feature = "wasm-executor")]
+use fuel_core_executor::executor::convert_tx_execution_result_to_preconfirmation;
+#[cfg(feature = "wasm-executor")]
+use fuel_core_types::{
+    fuel_types::Bytes32,
+    services::preconfirmation::{
+        Preconfirmation,
+        PreconfirmationStatus,
+    },
+};
 #[cfg(feature = "wasm-executor")]
 use fuel_core_wasm_executor::utils::{
+    ReturnType,
     convert_from_v0_execution_result,
     convert_from_v1_execution_result,
-    ReturnType,
 };
 
 #[cfg(feature = "wasm-executor")]
@@ -90,15 +98,39 @@ enum ExecutionStrategy {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum BlockHeightSelection {
+    Latest,
+    Past { height: BlockHeight },
+}
+
 enum ProduceBlockMode {
     Produce,
-    DryRunLatest,
-    DryRunAt { height: BlockHeight },
+    DryRun {
+        height: BlockHeightSelection,
+        record_storage_reads: bool,
+    },
 }
 impl ProduceBlockMode {
     fn is_dry_run(&self) -> bool {
-        matches!(self, Self::DryRunLatest | Self::DryRunAt { .. })
+        matches!(self, Self::DryRun { .. })
     }
+
+    fn record_storage_reads(&self) -> bool {
+        match self {
+            Self::Produce => false,
+            Self::DryRun {
+                record_storage_reads,
+                ..
+            } => *record_storage_reads,
+        }
+    }
+}
+
+/// Result of various `produce_*` functions
+struct ProducedBlock {
+    result: ExecutionResult,
+    storage_reads: Vec<StorageReadReplayEvent>,
 }
 
 /// The upgradable executor supports the WASM version of the state transition function.
@@ -123,6 +155,8 @@ pub struct Executor<S, R> {
 mod private {
     use std::sync::OnceLock;
     use wasmtime::{
+        Cache,
+        CacheConfig,
         Config,
         Engine,
         Module,
@@ -139,9 +173,11 @@ mod private {
         DEFAULT_ENGINE.get_or_init(|| {
             let mut config = Config::default();
             // Enables compilation caching.
-            config
-                .cache_config_load_default()
+            let cache_config = CacheConfig::from_file(None)
                 .expect("Failed to load the default cache config");
+            let cache =
+                Cache::new(cache_config).expect("Failed to create the default cache");
+            config.cache(Some(cache));
             Engine::new(&config).expect("Failed to create the default engine")
         })
     }
@@ -201,7 +237,19 @@ impl<S, R> Executor<S, R> {
         ("0-41-8", 23),
         // This update has been performed on the branch release/v0.41.9 which
         // is on top of the branch release/v0.41.8 not on master.
-        ("0-41-9", LATEST_STATE_TRANSITION_VERSION),
+        ("0-41-9", 24),
+        // This update is also shadowed by the branch release/v0.41.10 which
+        // is on top of the branch release/v0.41.9 not on master.
+        // 0.42.0 has been replaced by 0.41.10 at stf version 25
+        // this is fine because only devnet was upgraded to 0.42.0 before this.
+        ("0-41-10", 25),
+        ("0-43-0", 26),
+        ("0-43-1", 27),
+        ("0-43-2", 28),
+        ("0-44-0", 29),
+        // We are skipping 0-45-0 because it was not published.
+        ("0-45-1", 30),
+        ("0-46-0", LATEST_STATE_TRANSITION_VERSION),
     ];
 
     pub fn new(
@@ -336,6 +384,7 @@ where
 
         let options = self.config.as_ref().into();
         self.produce_inner_sync(component, options, ProduceBlockMode::Produce)
+            .map(|r| r.map_result(|produced| produced.result))
     }
 
     /// Executes a dry-run of the block and returns the result of the execution without committing the changes.
@@ -347,7 +396,15 @@ where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
         let options = self.config.as_ref().into();
-        self.produce_inner_sync(block, options, ProduceBlockMode::DryRunLatest)
+        self.produce_inner_sync(
+            block,
+            options,
+            ProduceBlockMode::DryRun {
+                height: BlockHeightSelection::Latest,
+                record_storage_reads: false,
+            },
+        )
+        .map(|r| r.map_result(|produced| produced.result))
     }
 }
 
@@ -367,7 +424,9 @@ where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
         let options = self.config.as_ref().into();
-        self.produce_inner_sync(block, options, ProduceBlockMode::Produce)
+        Ok(self
+            .produce_inner_sync(block, options, ProduceBlockMode::Produce)?
+            .map_result(|produced| produced.result))
     }
 
     /// Produces the block and returns the result of the execution without committing the changes.
@@ -381,14 +440,16 @@ where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
         let options = self.config.as_ref().into();
-        self.produce_inner(
-            components,
-            options,
-            ProduceBlockMode::Produce,
-            new_tx_waiter,
-            preconfirmation_sender,
-        )
-        .await
+        Ok(self
+            .produce_inner(
+                components,
+                options,
+                ProduceBlockMode::Produce,
+                new_tx_waiter,
+                preconfirmation_sender,
+            )
+            .await?
+            .map_result(|produced| produced.result))
     }
 
     /// Executes the block and returns the result of the execution without committing
@@ -398,7 +459,8 @@ where
         component: Components<Vec<Transaction>>,
         forbid_fake_coins: Option<bool>,
         at_height: Option<BlockHeight>,
-    ) -> ExecutorResult<Vec<(Transaction, TransactionExecutionStatus)>> {
+        record_storage_reads: bool,
+    ) -> ExecutorResult<DryRunResult> {
         if at_height.is_some() && !self.config.allow_historical_execution {
             return Err(ExecutorError::Other(
                 "The historical execution is not allowed".to_string(),
@@ -423,31 +485,41 @@ where
             gas_price: component.gas_price,
         };
 
-        let ExecutionResult {
-            block,
-            skipped_transactions,
-            tx_status,
-            ..
+        let ProducedBlock {
+            result:
+                ExecutionResult {
+                    block,
+                    skipped_transactions,
+                    tx_status,
+                    ..
+                },
+            storage_reads,
         } = self
             .produce_inner_sync(
                 component,
                 options,
-                match at_height {
-                    Some(height) => ProduceBlockMode::DryRunAt { height },
-                    None => ProduceBlockMode::DryRunLatest,
+                ProduceBlockMode::DryRun {
+                    height: match at_height {
+                        Some(height) => BlockHeightSelection::Past { height },
+                        None => BlockHeightSelection::Latest,
+                    },
+                    record_storage_reads,
                 },
             )?
             .into_result();
 
-        // If one of the transactions fails, return an error.
+        // If any of the transactions fails, return an error.
         if let Some((_, err)) = skipped_transactions.into_iter().next() {
             return Err(err)
         }
 
         let (_, txs) = block.into_inner();
-        let result = txs.into_iter().zip(tx_status).collect();
+        let transactions = txs.into_iter().zip(tx_status).collect();
 
-        Ok(result)
+        Ok(DryRunResult {
+            transactions,
+            storage_reads,
+        })
     }
 
     pub fn validate(
@@ -486,10 +558,9 @@ where
             match &self.execution_strategy {
                 ExecutionStrategy::Native => self.native_storage_read_replay(block),
                 ExecutionStrategy::Wasm { module } => {
-                    if let Ok(module) = self.get_module(block_version) {
-                        self.wasm_storage_read_replay(&module, block)
-                    } else {
-                        self.wasm_storage_read_replay(module, block)
+                    match self.get_module(block_version) {
+                        Ok(module) => self.wasm_storage_read_replay(&module, block),
+                        _ => self.wasm_storage_read_replay(module, block),
                     }
                 }
             }
@@ -581,7 +652,7 @@ where
         block: Components<TxSource>,
         options: ExecutionOptions,
         mode: ProduceBlockMode,
-    ) -> ExecutorResult<Uncommitted<ExecutionResult, Changes>>
+    ) -> ExecutorResult<Uncommitted<ProducedBlock, Changes>>
     where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
@@ -608,7 +679,7 @@ where
         mode: ProduceBlockMode,
         new_tx_waiter: impl NewTxWaiterPort,
         preconfirmation_sender: impl PreconfirmationSenderPort,
-    ) -> ExecutorResult<Uncommitted<ExecutionResult, Changes>>
+    ) -> ExecutorResult<Uncommitted<ProducedBlock, Changes>>
     where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
@@ -628,16 +699,34 @@ where
                 }
                 ExecutionStrategy::Wasm { module } => {
                     let maybe_blocks_module = self.get_module(block_version).ok();
-                    if let Some(blocks_module) = maybe_blocks_module {
-                        self.wasm_produce_inner(&blocks_module, block, options, mode)
-                    } else {
-                        self.wasm_produce_inner(module, block, options, mode)
+                    match maybe_blocks_module {
+                        Some(blocks_module) => {
+                            self.wasm_produce_inner(
+                                &blocks_module,
+                                block,
+                                options,
+                                mode,
+                                preconfirmation_sender,
+                            )
+                            .await
+                        }
+                        _ => {
+                            self.wasm_produce_inner(
+                                module,
+                                block,
+                                options,
+                                mode,
+                                preconfirmation_sender,
+                            )
+                            .await
+                        }
                     }
                 }
             }
         } else {
             let module = self.get_module(block_version)?;
-            self.wasm_produce_inner(&module, block, options, mode)
+            self.wasm_produce_inner(&module, block, options, mode, preconfirmation_sender)
+                .await
         }
     }
 
@@ -649,7 +738,7 @@ where
         mode: ProduceBlockMode,
         new_tx_waiter: impl NewTxWaiterPort,
         preconfirmation_sender: impl PreconfirmationSenderPort,
-    ) -> ExecutorResult<Uncommitted<ExecutionResult, Changes>>
+    ) -> ExecutorResult<Uncommitted<ProducedBlock, Changes>>
     where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
@@ -685,10 +774,11 @@ where
                 ExecutionStrategy::Native => self.native_validate_inner(block, options),
                 ExecutionStrategy::Wasm { module } => {
                     let maybe_blocks_module = self.get_module(block_version).ok();
-                    if let Some(blocks_module) = maybe_blocks_module {
-                        self.wasm_validate_inner(&blocks_module, block, options)
-                    } else {
-                        self.wasm_validate_inner(module, block, options)
+                    match maybe_blocks_module {
+                        Some(blocks_module) => {
+                            self.wasm_validate_inner(&blocks_module, block, options)
+                        }
+                        _ => self.wasm_validate_inner(module, block, options),
                     }
                 }
             }
@@ -727,13 +817,14 @@ where
     }
 
     #[cfg(feature = "wasm-executor")]
-    fn wasm_produce_inner<TxSource>(
+    async fn wasm_produce_inner<TxSource>(
         &self,
         module: &wasmtime::Module,
         component: Components<TxSource>,
         options: ExecutionOptions,
         mode: ProduceBlockMode,
-    ) -> ExecutorResult<Uncommitted<ExecutionResult, Changes>>
+        preconfirmation_sender: impl PreconfirmationSenderPort,
+    ) -> ExecutorResult<Uncommitted<ProducedBlock, Changes>>
     where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
@@ -758,19 +849,34 @@ where
 
         let db_height = match mode {
             ProduceBlockMode::Produce => block.header_to_produce.height().pred(),
-            ProduceBlockMode::DryRunLatest => None,
-            ProduceBlockMode::DryRunAt { height } => height.pred(),
+            ProduceBlockMode::DryRun { height, .. } => match height {
+                BlockHeightSelection::Latest => None,
+                BlockHeightSelection::Past { height } => height.pred(),
+            },
         };
 
         let instance_without_input =
             crate::instance::Instance::new(&self.engine).add_source(source)?;
 
+        let mut storage_rec = Default::default();
         let instance_without_input = if let Some(previous_block_height) = db_height {
             let storage = self.storage_view_provider.view_at(&previous_block_height)?;
-            instance_without_input.add_storage(storage)?
+            if mode.record_storage_reads() {
+                let storage = StorageAccessRecorder::new(storage);
+                storage_rec = storage.record.clone();
+                instance_without_input.add_storage(storage)?
+            } else {
+                instance_without_input.add_storage(storage)?
+            }
         } else {
             let storage = self.storage_view_provider.latest_view()?;
-            instance_without_input.add_storage(storage)?
+            if mode.record_storage_reads() {
+                let storage = StorageAccessRecorder::new(storage);
+                storage_rec = storage.record.clone();
+                instance_without_input.add_storage(storage)?
+            } else {
+                instance_without_input.add_storage(storage)?
+            }
         };
 
         let relayer = self.relayer_view_provider.latest_view()?;
@@ -784,7 +890,7 @@ where
 
         let output = instance.run(module)?;
 
-        match output {
+        let result = match output {
             ReturnType::ExecutionV0(result) => {
                 convert_from_v0_execution_result(result)
             },
@@ -797,7 +903,49 @@ where
                         .to_string(),
                 ))
             }
-        }
+        }?;
+
+        let execution_result = result.result();
+        let iter = execution_result.tx_status.iter();
+        let iter = iter.zip(execution_result.block.transactions());
+        let mut preconfirmations = iter
+            .enumerate()
+            .map(|(i, (status, tx))| {
+                let tx_index = u16::try_from(i).unwrap_or(u16::MAX);
+                let preconfirmation_status =
+                    convert_tx_execution_result_to_preconfirmation(
+                        tx,
+                        status.id,
+                        &status.result,
+                        *execution_result.block.header().height(),
+                        tx_index,
+                    );
+                preconfirmation_status
+            })
+            .collect::<Vec<_>>();
+
+        let squeezed_out =
+            execution_result
+                .skipped_transactions
+                .iter()
+                .map(|(tx_id, error)| Preconfirmation {
+                    tx_id: *tx_id,
+                    status: PreconfirmationStatus::SqueezedOut {
+                        reason: error.to_string(),
+                    },
+                });
+
+        preconfirmations.extend(squeezed_out);
+
+        let _ = preconfirmation_sender.send(preconfirmations).await;
+
+        let mut g = storage_rec.lock();
+        let storage_reads = core::mem::take(&mut *g);
+
+        Ok(result.map_result(|result| ProducedBlock {
+            result,
+            storage_reads,
+        }))
     }
 
     #[cfg(feature = "wasm-executor")]
@@ -848,7 +996,7 @@ where
         mode: ProduceBlockMode,
         new_tx_waiter: impl NewTxWaiterPort,
         preconfirmation_sender: impl PreconfirmationSenderPort,
-    ) -> ExecutorResult<Uncommitted<ExecutionResult, Changes>>
+    ) -> ExecutorResult<Uncommitted<ProducedBlock, Changes>>
     where
         TxSource: TransactionsSource + Send + Sync + 'static,
     {
@@ -856,31 +1004,69 @@ where
 
         let db_height = match mode {
             ProduceBlockMode::Produce => block.header_to_produce.height().pred(),
-            ProduceBlockMode::DryRunLatest => None,
-            ProduceBlockMode::DryRunAt { height } => height.pred(),
+            ProduceBlockMode::DryRun { height, .. } => match height {
+                BlockHeightSelection::Latest => None,
+                BlockHeightSelection::Past { height } => height.pred(),
+            },
         };
 
-        if let Some(previous_block_height) = db_height {
+        let mut storage_rec = Default::default();
+
+        let result = if let Some(previous_block_height) = db_height {
             let database = self.storage_view_provider.view_at(&previous_block_height)?;
-            ExecutionInstance::new(relayer, database, options)
-                .produce_without_commit(
-                    block,
-                    mode.is_dry_run(),
-                    new_tx_waiter,
-                    preconfirmation_sender,
-                )
-                .await
+            if mode.record_storage_reads() {
+                let database = StorageAccessRecorder::new(database);
+                storage_rec = database.record.clone();
+                ExecutionInstance::new(relayer, database, options)
+                    .produce_without_commit(
+                        block,
+                        mode.is_dry_run(),
+                        new_tx_waiter,
+                        preconfirmation_sender,
+                    )
+                    .await
+            } else {
+                ExecutionInstance::new(relayer, database, options)
+                    .produce_without_commit(
+                        block,
+                        mode.is_dry_run(),
+                        new_tx_waiter,
+                        preconfirmation_sender,
+                    )
+                    .await
+            }
         } else {
             let database = self.storage_view_provider.latest_view()?;
-            ExecutionInstance::new(relayer, database, options)
-                .produce_without_commit(
-                    block,
-                    mode.is_dry_run(),
-                    new_tx_waiter,
-                    preconfirmation_sender,
-                )
-                .await
-        }
+            if mode.record_storage_reads() {
+                let database = StorageAccessRecorder::new(database);
+                storage_rec = database.record.clone();
+                ExecutionInstance::new(relayer, database, options)
+                    .produce_without_commit(
+                        block,
+                        mode.is_dry_run(),
+                        new_tx_waiter,
+                        preconfirmation_sender,
+                    )
+                    .await
+            } else {
+                ExecutionInstance::new(relayer, database, options)
+                    .produce_without_commit(
+                        block,
+                        mode.is_dry_run(),
+                        new_tx_waiter,
+                        preconfirmation_sender,
+                    )
+                    .await
+            }
+        };
+
+        let mut g = storage_rec.lock();
+        let storage_reads = core::mem::take(&mut *g);
+
+        Ok(result?.map_result(|result| ProducedBlock {
+            result,
+            storage_reads,
+        }))
     }
 
     fn native_validate_inner(
@@ -999,12 +1185,12 @@ where
 mod test {
     use super::*;
     use fuel_core_storage::{
+        Result as StorageResult,
+        StorageAsMut,
         kv_store::Value,
         structured_storage::test::InMemoryStorage,
         tables::ConsensusParametersVersions,
         transactional::WriteTransaction,
-        Result as StorageResult,
-        StorageAsMut,
     };
     use fuel_core_types::{
         blockchain::{
@@ -1031,9 +1217,12 @@ mod test {
         services::relayer::Event,
         tai64::Tai64,
     };
-    use std::collections::{
-        BTreeMap,
-        BTreeSet,
+    use std::{
+        cmp::Ordering,
+        collections::{
+            BTreeMap,
+            BTreeSet,
+        },
     };
 
     #[derive(Clone, Debug)]
@@ -1095,6 +1284,51 @@ mod test {
         }
     }
 
+    /// wrapper type to ensure correct ordering of version strings
+    #[derive(Debug, Eq, PartialEq, Clone)]
+    struct VersionKey(String);
+
+    impl VersionKey {
+        fn new(version: String) -> Self {
+            VersionKey(version)
+        }
+
+        fn as_str(&self) -> &str {
+            &self.0
+        }
+    }
+
+    impl Ord for VersionKey {
+        fn cmp(&self, other: &Self) -> Ordering {
+            let self_parts: Vec<u32> = self
+                .0
+                .split('.')
+                .map(|s| s.parse::<u32>().unwrap_or(0))
+                .collect();
+
+            let other_parts: Vec<u32> = other
+                .0
+                .split('.')
+                .map(|s| s.parse::<u32>().unwrap_or(0))
+                .collect();
+
+            for (a, b) in self_parts.iter().zip(other_parts.iter()) {
+                match a.cmp(b) {
+                    Ordering::Equal => continue,
+                    other => return other,
+                }
+            }
+
+            self_parts.len().cmp(&other_parts.len())
+        }
+    }
+
+    impl PartialOrd for VersionKey {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+
     // When this test fails, it is a sign that we need to increase the `Executor::VERSION`.
     #[test]
     fn version_check() {
@@ -1107,11 +1341,13 @@ mod test {
             .map(|(crate_version, version)| {
                 let executor_crate_version = crate_version.to_string().replace('-', ".");
                 seen_executor_versions.insert(*version);
-                (executor_crate_version, *version)
+                (VersionKey::new(executor_crate_version), *version)
             })
             .collect::<BTreeMap<_, _>>();
 
-        if let Some(expected_version) = seen_crate_versions.get(crate_version) {
+        if let Some(expected_version) =
+            seen_crate_versions.get(&VersionKey::new(crate_version.to_string()))
+        {
             assert_eq!(
                 *expected_version,
                 Executor::<Storage, DisabledRelayer>::VERSION,
@@ -1128,7 +1364,8 @@ mod test {
 
         let last_crate_version = seen_crate_versions.last_key_value().unwrap().0.clone();
         assert_eq!(
-            crate_version, last_crate_version,
+            crate_version,
+            last_crate_version.as_str(),
             "The last version in the `CRATE_VERSIONS` constant \
                    should be the same as the current crate version."
         );
@@ -1183,15 +1420,17 @@ mod test {
                     generated: Empty,
                 },
             },
-            vec![Transaction::mint(
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                Default::default(),
-                AssetId::BASE,
-                Default::default(),
-            )
-            .into()],
+            vec![
+                Transaction::mint(
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    Default::default(),
+                    AssetId::BASE,
+                    Default::default(),
+                )
+                .into(),
+            ],
         )
         .generate(
             &[],
@@ -1244,8 +1483,8 @@ mod test {
     mod wasm {
         use super::*;
         use crate::{
-            executor::Executor,
             WASM_BYTECODE,
+            executor::Executor,
         };
         use fuel_core_storage::tables::UploadedBytecodes;
         use fuel_core_types::fuel_vm::UploadedBytecode;

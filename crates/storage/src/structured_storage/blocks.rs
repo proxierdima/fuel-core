@@ -3,18 +3,17 @@
 use crate::{
     blueprint::merklized::Merklized,
     codec::{
+        Encode,
         postcard::Postcard,
         primitive::Primitive,
-        Encode,
     },
     column::Column,
-    structured_storage::TableWithBlueprint,
     tables::{
+        FuelBlocks,
         merkle::{
             FuelBlockMerkleData,
             FuelBlockMerkleMetadata,
         },
-        FuelBlocks,
     },
 };
 use fuel_core_types::blockchain::block::{
@@ -22,6 +21,8 @@ use fuel_core_types::blockchain::block::{
     CompressedBlock,
 };
 use fuel_vm_private::fuel_tx::Bytes32;
+
+use super::TableWithBlueprint;
 
 /// The encoder of `CompressedBlock` for the `FuelBlocks` table.
 pub struct BlockEncoder;
@@ -52,24 +53,30 @@ impl TableWithBlueprint for FuelBlocks {
         FuelBlockMerkleData,
         BlockEncoder,
     >;
+
     type Column = Column;
 
-    fn column() -> Column {
+    fn column() -> Self::Column {
         Column::FuelBlocks
     }
 }
 
 #[cfg(test)]
+#[allow(non_snake_case)]
 mod tests {
+    use super::*;
     use crate::{
-        structured_storage::{
-            test::InMemoryStorage,
-            TableWithBlueprint,
-        },
-        tables::FuelBlocks,
-        transactional::ReadTransaction,
         StorageAsMut,
         StorageMutate,
+        blueprint::merklized::basic_tests_bmt::{
+            BMTTestDataGenerator,
+            Wrapper,
+        },
+        structured_storage::{
+            TableWithBlueprint,
+            test::InMemoryStorage,
+        },
+        transactional::ReadTransaction,
     };
     use fuel_core_types::{
         blockchain::{
@@ -82,13 +89,51 @@ mod tests {
         },
         fuel_types::ChainId,
     };
-    use fuel_vm_private::crypto::ephemeral_merkle_root;
+    use fuel_vm_private::{
+        crypto::ephemeral_merkle_root,
+        fuel_storage::Mappable,
+    };
+    use rand::{
+        Rng,
+        rngs::StdRng,
+    };
 
-    crate::basic_merklelized_storage_tests!(
-        FuelBlocks,
-        <FuelBlocks as crate::Mappable>::Key::default(),
-        <FuelBlocks as crate::Mappable>::Value::default()
-    );
+    impl BMTTestDataGenerator for FuelBlocks {
+        type Key = <FuelBlocks as Mappable>::Key;
+        type Value = Wrapper<<FuelBlocks as Mappable>::OwnedValue>;
+
+        fn key() -> Self::Key {
+            fuel_vm_private::fuel_types::BlockHeight::new(0)
+        }
+
+        fn random_key(rng: &mut StdRng) -> Self::Key {
+            rng.r#gen()
+        }
+
+        fn generate_value(rng: &mut StdRng) -> Self::Value {
+            let header = PartialBlockHeader {
+                application: Default::default(),
+                consensus: ConsensusHeader::<Empty> {
+                    height: rng.r#gen(),
+                    ..Default::default()
+                },
+            };
+            let block = PartialFuelBlock::new(header, vec![]);
+            let block = block
+                .generate(
+                    &[],
+                    Default::default(),
+                    #[cfg(feature = "fault-proving")]
+                    &Default::default(),
+                )
+                .expect("The block is valid")
+                .compress(&Default::default());
+
+            Wrapper(block)
+        }
+    }
+
+    crate::basic_merklized_storage_tests!(FuelBlocks);
 
     #[test_case::test_case(&[0]; "initial block with height 0")]
     #[test_case::test_case(&[1337]; "initial block with arbitrary height")]

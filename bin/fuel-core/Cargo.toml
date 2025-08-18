@@ -7,6 +7,7 @@ homepage = { workspace = true }
 keywords = ["blockchain", "cryptocurrencies", "fuel-vm", "vm"]
 license = { workspace = true }
 repository = { workspace = true }
+rust-version = { workspace = true }
 version = { workspace = true }
 name = "fuel-core-bin"
 publish = true
@@ -14,6 +15,34 @@ publish = true
 [[bin]]
 name = "fuel-core"
 path = "src/main.rs"
+
+[features]
+default = ["env", "relayer", "rocksdb"]
+aws-kms = ["dep:aws-config", "dep:aws-sdk-kms", "fuel-core-types/aws-kms"]
+env = ["dep:dotenvy"]
+p2p = ["fuel-core/p2p", "const_format", "dep:fuel-core-poa"]
+shared-sequencer = ["dep:fuel-core-shared-sequencer", "fuel-core/shared-sequencer"]
+relayer = ["fuel-core/relayer", "dep:url"]
+parquet = ["fuel-core-chain-config/parquet", "fuel-core-types/serde"]
+rocksdb = ["fuel-core/rocksdb"]
+rocksdb-production = ["fuel-core/rocksdb-production", "rocksdb"]
+# features to enable in production, but increase build times
+production = [
+    "env",
+    "relayer",
+    "rocksdb-production",
+    "p2p",
+    "shared-sequencer",
+    "parquet",
+    "aws-kms",
+]
+parallel-executor = ["fuel-core/parallel-executor"]
+fault-proving = [
+    "fuel-core-storage/fault-proving",
+    "fuel-core-types/fault-proving",
+    "fuel-core-chain-config/fault-proving",
+    "fuel-core/fault-proving",
+]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -27,8 +56,8 @@ dirs = "4.0"
 dotenvy = { version = "0.15", optional = true }
 fuel-core = { workspace = true, features = ["wasm-executor"] }
 fuel-core-chain-config = { workspace = true }
-fuel-core-compression = { workspace = true }
 fuel-core-metrics = { workspace = true }
+fuel-core-poa = { workspace = true, optional = true }
 fuel-core-shared-sequencer = { workspace = true, optional = true }
 fuel-core-types = { workspace = true, features = ["std"] }
 hex = { workspace = true }
@@ -58,35 +87,3 @@ serde = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
 test-case = { workspace = true }
-
-[features]
-default = ["env", "relayer", "rocksdb"]
-aws-kms = ["dep:aws-config", "dep:aws-sdk-kms", "fuel-core-types/aws-kms"]
-env = ["dep:dotenvy"]
-p2p = ["fuel-core/p2p", "const_format"]
-shared-sequencer = [
-  "dep:fuel-core-shared-sequencer",
-  "fuel-core/shared-sequencer",
-]
-relayer = ["fuel-core/relayer", "dep:url"]
-parquet = ["fuel-core-chain-config/parquet", "fuel-core-types/serde"]
-rocksdb = ["fuel-core/rocksdb"]
-rocksdb-production = ["fuel-core/rocksdb-production", "rocksdb"]
-# features to enable in production, but increase build times
-production = [
-  "env",
-  "relayer",
-  "rocksdb-production",
-  "p2p",
-  "shared-sequencer",
-  "parquet",
-  "aws-kms",
-]
-parallel-executor = ["fuel-core/parallel-executor"]
-fault-proving = [
-  "fuel-core-compression/fault-proving",
-  "fuel-core-storage/fault-proving",
-  "fuel-core-types/fault-proving",
-  "fuel-core-chain-config/fault-proving",
-  "fuel-core/fault-proving",
-]

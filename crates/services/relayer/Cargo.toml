@@ -7,7 +7,18 @@ homepage = { workspace = true }
 keywords = ["blockchain", "fuel", "fuel-vm"]
 license = { workspace = true }
 repository = { workspace = true }
+rust-version = { workspace = true }
 description = "Fuel Relayer"
+
+[features]
+test-helpers = [
+    "bytes",
+    "parking_lot",
+    "serde",
+    "serde_json",
+    "thiserror",
+    "fuel-core-types/test-helpers",
+]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -47,13 +58,3 @@ mockall = { workspace = true }
 rand = { workspace = true }
 test-case = { workspace = true }
 tokio = { workspace = true, features = ["macros", "test-util"] }
-
-[features]
-test-helpers = [
-  "bytes",
-  "parking_lot",
-  "serde",
-  "serde_json",
-  "thiserror",
-  "fuel-core-types/test-helpers",
-]

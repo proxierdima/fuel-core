@@ -2,7 +2,6 @@ use self::indexation::error::IndexationError;
 
 use super::{
     block_height_subscription,
-    da_compression::da_compress_block,
     indexation,
     storage::old::{
         OldFuelBlockConsensus,
@@ -22,8 +21,8 @@ use crate::{
         storage::{
             blocks::FuelBlockIdsToHeights,
             coins::{
-                owner_coin_id_key,
                 OwnedCoins,
+                owner_coin_id_key,
             },
             contracts::ContractsInfo,
             messages::{
@@ -40,12 +39,12 @@ use crate::{
 };
 use fuel_core_metrics::graphql_metrics::graphql_metrics;
 use fuel_core_services::{
-    stream::BoxStream,
     RunnableService,
     RunnableTask,
     ServiceRunner,
     StateWatcher,
     TaskNextAction,
+    stream::BoxStream,
 };
 use fuel_core_storage::{
     Error as StorageError,
@@ -63,6 +62,15 @@ use fuel_core_types::{
     },
     entities::relayer::transaction::RelayedTransactionStatus,
     fuel_tx::{
+        AssetId,
+        ConsensusParameters,
+        Contract,
+        Input,
+        Output,
+        Receipt,
+        Transaction,
+        TxId,
+        UniqueIdentifier,
         field::{
             Inputs,
             Outputs,
@@ -73,15 +81,6 @@ use fuel_core_types::{
             CoinPredicate,
             CoinSigned,
         },
-        AssetId,
-        ConsensusParameters,
-        Contract,
-        Input,
-        Output,
-        Receipt,
-        Transaction,
-        TxId,
-        UniqueIdentifier,
     },
     fuel_types::{
         BlockHeight,
@@ -107,7 +106,9 @@ use futures::{
 use std::{
     borrow::Cow,
     ops::Deref,
+    sync::Arc,
 };
+
 #[cfg(test)]
 mod tests;
 
@@ -116,21 +117,14 @@ pub(crate) struct Context<'a, TxStatusManager, BlockImporter, OnChain, OffChain>
     pub(crate) block_importer: BlockImporter,
     pub(crate) on_chain_database: OnChain,
     pub(crate) off_chain_database: OffChain,
-    pub(crate) da_compression_config: DaCompressionConfig,
     pub(crate) continue_on_error: bool,
+    pub(crate) block_subscriptions_queue: usize,
     pub(crate) consensus_parameters: &'a ConsensusParameters,
-}
-
-#[derive(Debug, Clone)]
-pub enum DaCompressionConfig {
-    Disabled,
-    Enabled(fuel_core_compression::config::Config),
 }
 
 /// The initialization task recovers the state of the GraphQL service database on startup.
 pub struct InitializeTask<TxStatusManager, BlockImporter, OnChain, OffChain> {
     chain_id: ChainId,
-    da_compression_config: DaCompressionConfig,
     continue_on_error: bool,
     tx_status_manager: TxStatusManager,
     blocks_events: BoxStream<SharedImportResult>,
@@ -138,7 +132,13 @@ pub struct InitializeTask<TxStatusManager, BlockImporter, OnChain, OffChain> {
     on_chain_database: OnChain,
     off_chain_database: OffChain,
     base_asset_id: AssetId,
-    block_height_subscription_handler: block_height_subscription::Handler,
+    shared_state: SharedState,
+}
+
+#[derive(Clone)]
+pub struct SharedState {
+    pub block_height_subscription_handler: block_height_subscription::Handler,
+    pub block_subscription: tokio::sync::broadcast::Sender<Arc<Vec<u8>>>,
 }
 
 /// The off-chain GraphQL API worker task processes the imported blocks
@@ -148,13 +148,12 @@ pub struct Task<TxStatusManager, D> {
     block_importer: BoxStream<SharedImportResult>,
     database: D,
     chain_id: ChainId,
-    da_compression_config: DaCompressionConfig,
     continue_on_error: bool,
     balances_indexation_enabled: bool,
     coins_to_spend_indexation_enabled: bool,
     asset_metadata_indexation_enabled: bool,
     base_asset_id: AssetId,
-    block_height_subscription_handler: block_height_subscription::Handler,
+    shared_state: SharedState,
 }
 
 impl<TxStatusManager, D> Task<TxStatusManager, D>
@@ -196,25 +195,28 @@ where
             &self.base_asset_id,
         )?;
 
-        match self.da_compression_config {
-            DaCompressionConfig::Disabled => {}
-            DaCompressionConfig::Enabled(config) => {
-                da_compress_block(config, block, &result.events, &mut transaction)?;
-            }
-        }
-
         transaction.commit()?;
 
         for status in result.tx_status.iter() {
             let tx_id = status.id;
             let status = from_executor_to_status(block, status.result.clone());
+
             self.tx_status_manager
                 .send_complete(tx_id, height, status.into());
         }
 
         // Notify subscribers and update last seen block height
-        self.block_height_subscription_handler
+        self.shared_state
+            .block_height_subscription_handler
             .notify_and_update(*height);
+
+        let import_result = result.as_ref().deref();
+        let raw_import_result = postcard::to_allocvec(import_result)?;
+
+        let _ = self
+            .shared_state
+            .block_subscription
+            .send(Arc::new(raw_import_result));
         // Get all the subscribers that need to be notified that the block height
         // has been reached.
 
@@ -567,12 +569,12 @@ where
     OffChain: ports::worker::OffChainDatabase,
 {
     const NAME: &'static str = "GraphQL_Off_Chain_Worker";
-    type SharedData = block_height_subscription::Subscriber;
+    type SharedData = SharedState;
     type Task = Task<TxStatusManager, OffChain>;
     type TaskParams = ();
 
     fn shared_data(&self) -> Self::SharedData {
-        self.block_height_subscription_handler.subscribe()
+        self.shared_state.clone()
     }
 
     async fn into_task(
@@ -607,7 +609,6 @@ where
 
         let InitializeTask {
             chain_id,
-            da_compression_config,
             tx_status_manager,
             block_importer,
             blocks_events,
@@ -615,7 +616,7 @@ where
             off_chain_database,
             continue_on_error,
             base_asset_id,
-            block_height_subscription_handler,
+            shared_state,
         } = self;
 
         let mut task = Task {
@@ -623,13 +624,12 @@ where
             block_importer: blocks_events,
             database: off_chain_database,
             chain_id,
-            da_compression_config,
             continue_on_error,
             balances_indexation_enabled,
             coins_to_spend_indexation_enabled,
             asset_metadata_indexation_enabled,
             base_asset_id,
-            block_height_subscription_handler,
+            shared_state,
         };
 
         let mut target_chain_height = on_chain_database.latest_height()?;
@@ -703,23 +703,23 @@ where
             }
 
             result = self.block_importer.next() => {
-                if let Some(block) = result {
+                match result { Some(block) => {
                     let result = self.process_block(block);
 
                     // In the case of an error, shut down the service to avoid a huge
                     // de-synchronization between on-chain and off-chain databases.
-                    if let Err(e) = result {
+                    match result { Err(e) => {
                         if self.continue_on_error {
                             TaskNextAction::ErrorContinue(e)
                         } else {
                             TaskNextAction::Stop
                         }
-                    } else {
+                    } _ => {
                         TaskNextAction::Continue
-                    }
-                } else {
+                    }}
+                } _ => {
                     TaskNextAction::Stop
-                }
+                }}
             }
         }
     }
@@ -729,10 +729,13 @@ where
         loop {
             let result = self.block_importer.next().now_or_never();
 
-            if let Some(Some(block)) = result {
-                self.process_block(block)?;
-            } else {
-                break;
+            match result {
+                Some(Some(block)) => {
+                    self.process_block(block)?;
+                }
+                _ => {
+                    break;
+                }
             }
         }
         Ok(())
@@ -756,12 +759,18 @@ where
         block_importer,
         on_chain_database,
         off_chain_database,
-        da_compression_config,
         continue_on_error,
+        block_subscriptions_queue,
         consensus_parameters,
     } = context;
 
     let off_chain_block_height = off_chain_database.latest_height()?.unwrap_or_default();
+    let block_height_subscription_handler =
+        block_height_subscription::Handler::new(off_chain_block_height);
+    let shared_state = SharedState {
+        block_height_subscription_handler,
+        block_subscription: tokio::sync::broadcast::channel(block_subscriptions_queue).0,
+    };
 
     let service = ServiceRunner::new(InitializeTask {
         tx_status_manager,
@@ -770,12 +779,9 @@ where
         on_chain_database,
         off_chain_database,
         chain_id: consensus_parameters.chain_id(),
-        da_compression_config,
         continue_on_error,
         base_asset_id: *consensus_parameters.base_asset_id(),
-        block_height_subscription_handler: block_height_subscription::Handler::new(
-            off_chain_block_height,
-        ),
+        shared_state,
     });
 
     Ok(service)

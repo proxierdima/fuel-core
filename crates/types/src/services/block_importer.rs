@@ -2,15 +2,15 @@
 
 use crate::{
     blockchain::{
-        header::BlockHeader,
         SealedBlock,
+        header::BlockHeader,
     },
     services::{
+        Uncommitted,
         executor::{
             Event,
             TransactionExecutionStatus,
         },
-        Uncommitted,
     },
 };
 use core::ops::Deref;
@@ -29,8 +29,22 @@ pub type UncommittedResult<DatabaseTransaction> =
 /// The alias for the `ImportResult` that can be shared between threads.
 pub type SharedImportResult = Arc<dyn Deref<Target = ImportResult> + Send + Sync>;
 
-/// The result of the block import.
+/// Thin wrapper over `ImportResult` that implements `Deref` and
+/// thus can be used in the SharedImportResult.
 #[derive(Debug)]
+pub struct WrappedImportResult(ImportResult);
+
+impl Deref for WrappedImportResult {
+    type Target = ImportResult;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// The result of the block import.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(any(test, feature = "test-helpers"), derive(Default))]
 pub struct ImportResult {
     /// Imported sealed block.
@@ -43,16 +57,16 @@ pub struct ImportResult {
     pub source: Source,
 }
 
-impl Deref for ImportResult {
-    type Target = Self;
-
-    fn deref(&self) -> &Self::Target {
-        self
+impl ImportResult {
+    /// Wrap this result into a `WrappedImportResult`.
+    pub fn wrap(self) -> WrappedImportResult {
+        WrappedImportResult(self)
     }
 }
 
 /// The source producer of the block.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Source {
     /// The block was imported from the network.
     Network,

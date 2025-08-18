@@ -7,12 +7,12 @@ use crate::ports::{
     TxPool,
 };
 use fuel_core_storage::{
+    Result as StorageResult,
     not_found,
     transactional::{
         AtomicView,
         Changes,
     },
-    Result as StorageResult,
 };
 use fuel_core_types::{
     blockchain::{
@@ -36,10 +36,10 @@ use fuel_core_types::{
     services::{
         block_producer::Components,
         executor::{
+            DryRunResult,
             Error as ExecutorError,
             ExecutionResult,
             Result as ExecutorResult,
-            TransactionExecutionStatus,
             UncommittedResult,
         },
     },
@@ -163,19 +163,20 @@ impl BlockProducer<Vec<Transaction>> for FailingMockExecutor {
     ) -> ExecutorResult<UncommittedResult<Changes>> {
         // simulate an execution failure
         let mut err = self.0.lock().unwrap();
-        if let Some(err) = err.take() {
-            Err(err)
-        } else {
-            let block = arc_pool_tx_comp_to_block(&component);
-            Ok(UncommittedResult::new(
-                ExecutionResult {
-                    block,
-                    skipped_transactions: vec![],
-                    tx_status: vec![],
-                    events: vec![],
-                },
-                Default::default(),
-            ))
+        match err.take() {
+            Some(err) => Err(err),
+            _ => {
+                let block = arc_pool_tx_comp_to_block(&component);
+                Ok(UncommittedResult::new(
+                    ExecutionResult {
+                        block,
+                        skipped_transactions: vec![],
+                        tx_status: vec![],
+                        events: vec![],
+                    },
+                    Default::default(),
+                ))
+            }
         }
     }
 }
@@ -212,10 +213,14 @@ impl DryRunner for MockExecutorWithCapture {
         block: Components<Vec<Transaction>>,
         _utxo_validation: Option<bool>,
         _height: Option<BlockHeight>,
-    ) -> ExecutorResult<Vec<(Transaction, TransactionExecutionStatus)>> {
+        _record_storage_read_replay: bool,
+    ) -> ExecutorResult<DryRunResult> {
         *self.captured.lock().unwrap() = Some(block);
 
-        Ok(Vec::new())
+        Ok(DryRunResult {
+            transactions: Vec::new(),
+            storage_reads: Vec::new(),
+        })
     }
 }
 

@@ -7,6 +7,8 @@ use super::scalars::{
 use crate::{
     coins_query::CoinsQueryError,
     fuel_core_graphql_api::{
+        Config as GraphQLConfig,
+        IntoApiResult,
         api_service::{
             BlockProducer,
             ChainInfoProvider,
@@ -14,19 +16,19 @@ use crate::{
             TxPool,
         },
         query_costs,
-        Config as GraphQLConfig,
-        IntoApiResult,
     },
     graphql_api::{
         database::ReadView,
         ports::MemoryPool,
+        require_expensive_subscriptions,
     },
     query::{
+        TxnStatusChangeState,
         asset_query::Exclude,
         transaction_status_change,
-        TxnStatusChangeState,
     },
     schema::{
+        ReadViewProvider,
         coins::ExcludeInput,
         gas_price::EstimateGasPriceExt,
         scalars::{
@@ -44,27 +46,27 @@ use crate::{
             types::{
                 AssembleTransactionResult,
                 TransactionStatus,
+                get_tx_status,
             },
         },
-        ReadViewProvider,
     },
     service::adapters::SharedMemoryPool,
 };
 use async_graphql::{
+    Context,
+    Object,
+    Subscription,
     connection::{
         Connection,
         EmptyFields,
     },
-    Context,
-    Object,
-    Subscription,
 };
 use fuel_core_storage::{
-    iter::IterDirection,
     Error as StorageError,
     IsNotFound,
     PredicateStorageRequirements,
     Result as StorageResult,
+    iter::IterDirection,
 };
 use fuel_core_tx_status_manager::TxStatusMessage;
 use fuel_core_types::{
@@ -84,7 +86,10 @@ use fuel_core_types::{
         CheckPredicateParams,
         EstimatePredicates,
     },
-    services::txpool,
+    services::{
+        executor::DryRunResult,
+        transaction_status,
+    },
 };
 use futures::{
     Stream,
@@ -97,6 +102,7 @@ use std::{
     sync::Arc,
 };
 use types::{
+    DryRunStorageReads,
     DryRunTransactionExecutionStatus,
     StorageReadReplayEvent,
     Transaction,
@@ -112,6 +118,82 @@ pub mod upgrade_purpose;
 #[derive(Default)]
 pub struct TxQuery;
 
+impl TxQuery {
+    /// The actual logic of all different dry-run queries.
+    async fn dry_run_inner(
+        &self,
+        ctx: &Context<'_>,
+        txs: Vec<HexString>,
+        // If set to false, disable input utxo validation, overriding the configuration of the node.
+        // This allows for non-existent inputs to be used without signature validation
+        // for read-only calls.
+        utxo_validation: Option<bool>,
+        gas_price: Option<U64>,
+        // This can be used to run the dry-run on top of a past block.
+        // Requires `--historical-execution` flag to be enabled.
+        block_height: Option<U32>,
+        // Record storage reads, so this tx can be used with execution tracer in a local debugger.
+        record_storage_reads: bool,
+    ) -> async_graphql::Result<DryRunStorageReads> {
+        let config = ctx.data_unchecked::<GraphQLConfig>().clone();
+        let block_producer = ctx.data_unchecked::<BlockProducer>();
+        let consensus_params = ctx
+            .data_unchecked::<ChainInfoProvider>()
+            .current_consensus_params();
+        let block_gas_limit = consensus_params.block_gas_limit();
+
+        if block_height.is_some() && !config.historical_execution {
+            return Err(anyhow::anyhow!(
+                "The `blockHeight` parameter requires the `--historical-execution` option"
+            )
+            .into());
+        }
+
+        let mut transactions = txs
+            .iter()
+            .map(|tx| FuelTx::from_bytes(&tx.0))
+            .collect::<Result<Vec<FuelTx>, _>>()?;
+        transactions.iter_mut().try_fold::<_, _, async_graphql::Result<u64>>(0u64, |acc, tx| {
+            let gas = tx.max_gas(&consensus_params)?;
+            let gas = gas.saturating_add(acc);
+            if gas > block_gas_limit {
+                return Err(anyhow::anyhow!("The sum of the gas usable by the transactions is greater than the block gas limit").into());
+            }
+            tx.precompute(&consensus_params.chain_id())?;
+            Ok(gas)
+        })?;
+
+        let DryRunResult {
+            transactions,
+            storage_reads,
+        } = block_producer
+            .dry_run_txs(
+                transactions,
+                block_height.map(|x| x.into()),
+                None, // TODO(#1749): Pass parameter from API
+                utxo_validation,
+                gas_price.map(|x| x.into()),
+                record_storage_reads,
+            )
+            .await?;
+
+        let tx_statuses = transactions
+            .into_iter()
+            .map(|(_, status)| DryRunTransactionExecutionStatus(status))
+            .collect();
+
+        let storage_reads = storage_reads
+            .into_iter()
+            .map(|event| event.into())
+            .collect();
+
+        Ok(DryRunStorageReads {
+            tx_statuses,
+            storage_reads,
+        })
+    }
+}
+
 #[Object]
 impl TxQuery {
     #[graphql(complexity = "query_costs().storage_read + child_complexity")]
@@ -124,13 +206,12 @@ impl TxQuery {
         let id = id.0;
         let txpool = ctx.data_unchecked::<TxPool>();
 
-        if let Some(transaction) = txpool.transaction(id).await? {
-            Ok(Some(Transaction(transaction, id)))
-        } else {
-            query
+        match txpool.transaction(id).await? {
+            Some(transaction) => Ok(Some(Transaction(transaction, id))),
+            _ => query
                 .transaction(&id)
                 .map(|tx| Transaction::from_tx(id, tx))
-                .into_api_result()
+                .into_api_result(),
         }
     }
 
@@ -404,8 +485,16 @@ impl TxQuery {
         };
 
         let (assembled_tx, status) = block_producer
-            .dry_run_txs(vec![assembled_tx], None, None, Some(false), Some(gas_price))
+            .dry_run_txs(
+                vec![assembled_tx],
+                None,
+                None,
+                Some(false),
+                Some(gas_price),
+                false,
+            )
             .await?
+            .transactions
             .into_iter()
             .next()
             .ok_or_else(|| {
@@ -470,49 +559,32 @@ impl TxQuery {
         // Requires `--historical-execution` flag to be enabled.
         block_height: Option<U32>,
     ) -> async_graphql::Result<Vec<DryRunTransactionExecutionStatus>> {
-        let config = ctx.data_unchecked::<GraphQLConfig>().clone();
-        let block_producer = ctx.data_unchecked::<BlockProducer>();
-        let consensus_params = ctx
-            .data_unchecked::<ChainInfoProvider>()
-            .current_consensus_params();
-        let block_gas_limit = consensus_params.block_gas_limit();
+        Ok(self
+            .dry_run_inner(ctx, txs, utxo_validation, gas_price, block_height, false)
+            .await?
+            .tx_statuses)
+    }
 
-        if block_height.is_some() && !config.historical_execution {
-            return Err(anyhow::anyhow!(
-                "The `blockHeight` parameter requires the `--historical-execution` option"
-            )
-            .into());
-        }
-
-        let mut transactions = txs
-            .iter()
-            .map(|tx| FuelTx::from_bytes(&tx.0))
-            .collect::<Result<Vec<FuelTx>, _>>()?;
-        transactions.iter_mut().try_fold::<_, _, async_graphql::Result<u64>>(0u64, |acc, tx| {
-            let gas = tx.max_gas(&consensus_params)?;
-            let gas = gas.saturating_add(acc);
-            if gas > block_gas_limit {
-                return Err(anyhow::anyhow!("The sum of the gas usable by the transactions is greater than the block gas limit").into());
-            }
-            tx.precompute(&consensus_params.chain_id())?;
-            Ok(gas)
-        })?;
-
-        let tx_statuses = block_producer
-            .dry_run_txs(
-                transactions,
-                block_height.map(|x| x.into()),
-                None, // TODO(#1749): Pass parameter from API
-                utxo_validation,
-                gas_price.map(|x| x.into()),
-            )
-            .await?;
-        let tx_statuses = tx_statuses
-            .into_iter()
-            .map(|(_, status)| DryRunTransactionExecutionStatus(status))
-            .collect();
-
-        Ok(tx_statuses)
+    /// Execute a dry-run of multiple transactions using a fork of current state, no changes are committed.
+    /// Also records accesses, so the execution can be replicated locally.
+    #[graphql(
+        complexity = "query_costs().dry_run * txs.len() + child_complexity * txs.len()"
+    )]
+    async fn dry_run_record_storage_reads(
+        &self,
+        ctx: &Context<'_>,
+        txs: Vec<HexString>,
+        // If set to false, disable input utxo validation, overriding the configuration of the node.
+        // This allows for non-existent inputs to be used without signature validation
+        // for read-only calls.
+        utxo_validation: Option<bool>,
+        gas_price: Option<U64>,
+        // This can be used to run the dry-run on top of a past block.
+        // Requires `--historical-execution` flag to be enabled.
+        block_height: Option<U32>,
+    ) -> async_graphql::Result<DryRunStorageReads> {
+        self.dry_run_inner(ctx, txs, utxo_validation, gas_price, block_height, true)
+            .await
     }
 
     /// Get execution trace for an already-executed block.
@@ -624,8 +696,11 @@ impl TxStatusSubscription {
         &self,
         ctx: &'a Context<'a>,
         #[graphql(desc = "The ID of the transaction")] id: TransactionId,
-    ) -> anyhow::Result<impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a>
-    {
+        #[graphql(desc = "If true, accept to receive the preconfirmation status")]
+        include_preconfirmation: Option<bool>,
+    ) -> anyhow::Result<
+        impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a + use<'a>,
+    > {
         let tx_status_manager = ctx.data_unchecked::<DynTxStatusManager>();
         let rx = tx_status_manager.tx_update_subscribe(id.into()).await?;
         let query = ctx.read_view()?;
@@ -634,11 +709,37 @@ impl TxStatusSubscription {
             tx_status_manager,
             query,
         };
-        Ok(
-            transaction_status_change(status_change_state, rx, id.into())
-                .await
-                .map_err(async_graphql::Error::from),
+        Ok(transaction_status_change(
+            status_change_state,
+            rx,
+            id.into(),
+            include_preconfirmation.unwrap_or(false),
         )
+        .await
+        .map_err(async_graphql::Error::from))
+    }
+
+    #[graphql(name = "alpha__preconfirmations")]
+    async fn preconfirmations<'a>(
+        &self,
+        ctx: &'a Context<'a>,
+    ) -> async_graphql::Result<
+        impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a + use<'a>,
+    > {
+        use futures::StreamExt;
+
+        require_expensive_subscriptions(ctx)?;
+
+        let tx_status_manager = ctx.data_unchecked::<DynTxStatusManager>();
+        let stream = tx_status_manager.subscribe_txs_updates()?;
+
+        let stream = stream.map(|result| {
+            result
+                .map(|(id, status)| TransactionStatus::new(id, status))
+                .map_err(Into::into)
+        });
+
+        Ok(stream)
     }
 
     /// Submits transaction to the `TxPool` and await either success or failure.
@@ -649,11 +750,11 @@ impl TxStatusSubscription {
         tx: HexString,
         estimate_predicates: Option<bool>,
     ) -> async_graphql::Result<
-        impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a,
+        impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a + use<'a>,
     > {
         use tokio_stream::StreamExt;
         let subscription =
-            submit_and_await_status(ctx, tx, estimate_predicates.unwrap_or(false))
+            submit_and_await_status(ctx, tx, estimate_predicates.unwrap_or(false), false)
                 .await?;
 
         Ok(subscription
@@ -663,17 +764,24 @@ impl TxStatusSubscription {
 
     /// Submits the transaction to the `TxPool` and returns a stream of events.
     /// Compared to the `submitAndAwait`, the stream also contains
-    /// `SubmittedStatus` as an intermediate state.
+    /// `SubmittedStatus` and potentially preconfirmation as an intermediate state.
     #[graphql(complexity = "query_costs().submit_and_await + child_complexity")]
     async fn submit_and_await_status<'a>(
         &self,
         ctx: &'a Context<'a>,
         tx: HexString,
         estimate_predicates: Option<bool>,
+        include_preconfirmation: Option<bool>,
     ) -> async_graphql::Result<
-        impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a,
+        impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a + use<'a>,
     > {
-        submit_and_await_status(ctx, tx, estimate_predicates.unwrap_or(false)).await
+        submit_and_await_status(
+            ctx,
+            tx,
+            estimate_predicates.unwrap_or(false),
+            include_preconfirmation.unwrap_or(false),
+        )
+        .await
     }
 }
 
@@ -681,6 +789,7 @@ async fn submit_and_await_status<'a>(
     ctx: &'a Context<'a>,
     tx: HexString,
     estimate_predicates: bool,
+    include_preconfirmation: bool,
 ) -> async_graphql::Result<
     impl Stream<Item = async_graphql::Result<TransactionStatus>> + 'a,
 > {
@@ -703,16 +812,24 @@ async fn submit_and_await_status<'a>(
     txpool.insert(tx).await?;
 
     Ok(subscription
-        .map(move |event| match event {
-            TxStatusMessage::Status(status) => {
-                let status = TransactionStatus::new(tx_id, status);
-                Ok(status)
-            }
-            TxStatusMessage::FailedStatus => {
-                Err(anyhow::anyhow!("Failed to get transaction status").into())
+        .filter_map(move |status| {
+            match status {
+                TxStatusMessage::Status(status) => {
+                    let status = TransactionStatus::new(tx_id, status);
+                    if !include_preconfirmation && status.is_preconfirmation() {
+                        None
+                    } else {
+                        Some(Ok(status))
+                    }
+                }
+                // Map a failed status to an error for the api.
+                TxStatusMessage::FailedStatus => Some(Err(anyhow::anyhow!(
+                    "Failed to get transaction status"
+                )
+                .into())),
             }
         })
-        .take(2))
+        .take(3))
 }
 
 struct StatusChangeState<'a> {
@@ -720,18 +837,19 @@ struct StatusChangeState<'a> {
     tx_status_manager: &'a DynTxStatusManager,
 }
 
-impl<'a> TxnStatusChangeState for StatusChangeState<'a> {
+impl TxnStatusChangeState for StatusChangeState<'_> {
     async fn get_tx_status(
         &self,
         id: Bytes32,
-    ) -> StorageResult<Option<txpool::TransactionStatus>> {
-        match self.query.tx_status(&id) {
-            Ok(status) => Ok(Some(status.into())),
-            Err(StorageError::NotFound(_, _)) => {
-                Ok(self.tx_status_manager.status(id).await?)
-            }
-            Err(err) => Err(err),
-        }
+        include_preconfirmation: bool,
+    ) -> StorageResult<Option<transaction_status::TransactionStatus>> {
+        get_tx_status(
+            &id,
+            self.query.as_ref(),
+            self.tx_status_manager,
+            include_preconfirmation,
+        )
+        .await
     }
 }
 
@@ -863,20 +981,21 @@ pub trait ContextExt {
     ) -> impl Future<Output = anyhow::Result<FuelTx>> + Send;
 }
 
-impl<'a> ContextExt for Context<'a> {
+impl ContextExt for Context<'_> {
     async fn try_find_tx(&self, id: Bytes32) -> StorageResult<Option<FuelTx>> {
         let query = self.read_view()?;
         let txpool = self.data_unchecked::<TxPool>();
 
-        if let Some(tx) = txpool.transaction(id).await? {
-            Ok(Some(tx))
-        } else {
-            let result = query.transaction(&id);
+        match txpool.transaction(id).await? {
+            Some(tx) => Ok(Some(tx)),
+            _ => {
+                let result = query.transaction(&id);
 
-            if result.is_not_found() {
-                Ok(None)
-            } else {
-                result.map(Some)
+                if result.is_not_found() {
+                    Ok(None)
+                } else {
+                    result.map(Some)
+                }
             }
         }
     }
@@ -888,7 +1007,7 @@ impl<'a> ContextExt for Context<'a> {
     ) -> anyhow::Result<FuelTx> {
         let mut has_predicates = false;
 
-        for input in tx.inputs()? {
+        for input in tx.inputs().iter() {
             if input.predicate().is_some() {
                 has_predicates = true;
                 break;

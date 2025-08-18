@@ -1,4 +1,5 @@
 use crate::{
+    coins_query::CoinsQueryError,
     fuel_core_graphql_api::{
         api_service::BlockProducer,
         database::ReadView,
@@ -21,12 +22,22 @@ use crate::{
 use fuel_core_types::{
     entities::coins::CoinId,
     fuel_asm::{
-        op,
         PanicReason,
         Word,
+        op,
     },
     fuel_crypto::Signature,
     fuel_tx::{
+        Address,
+        AssetId,
+        Cacheable,
+        Chargeable,
+        ConsensusParameters,
+        Input,
+        Output,
+        Receipt,
+        Script,
+        Transaction,
         field::{
             Inputs,
             MaxFeeLimit,
@@ -45,20 +56,10 @@ use fuel_core_types::{
             },
         },
         policies::PolicyType,
-        Address,
-        AssetId,
-        Cacheable,
-        Chargeable,
-        ConsensusParameters,
-        Input,
-        Output,
-        Receipt,
-        Script,
-        Transaction,
     },
     fuel_types::{
-        canonical::Serialize,
         ContractId,
+        canonical::Serialize,
     },
     fuel_vm::{
         checked_transaction::CheckPredicateParams,
@@ -71,9 +72,9 @@ use fuel_core_types::{
 };
 use std::{
     collections::{
-        hash_map::Entry,
         HashMap,
         HashSet,
+        hash_map::Entry,
     },
     sync::Arc,
 };
@@ -93,13 +94,14 @@ pub struct AssembleArguments<'a> {
     pub shared_memory_pool: &'a SharedMemoryPool,
 }
 
-impl<'a> AssembleArguments<'a> {
+impl AssembleArguments<'_> {
     async fn coins(
         &self,
         owner: Address,
         asset_id: AssetId,
         amount: u64,
         remaining_input_slots: u16,
+        allow_partial: bool,
     ) -> anyhow::Result<Vec<CoinType>> {
         if amount == 0 {
             return Ok(Vec::new());
@@ -109,6 +111,7 @@ impl<'a> AssembleArguments<'a> {
             asset_id: asset_id.into(),
             amount: (amount as u128).into(),
             max: None,
+            allow_partial: Some(allow_partial),
         };
 
         let result = self
@@ -137,8 +140,9 @@ impl<'a> AssembleArguments<'a> {
         script: Script,
     ) -> anyhow::Result<(Transaction, TransactionExecutionStatus)> {
         self.block_producer
-            .dry_run_txs(vec![script.into()], None, None, Some(false), Some(0))
+            .dry_run_txs(vec![script.into()], None, None, Some(false), Some(0), false)
             .await?
+            .transactions
             .into_iter()
             .next()
             .ok_or_else(|| anyhow::anyhow!("No result for the dry run"))
@@ -424,7 +428,7 @@ where
 
             let selected_coins = self
                 .arguments
-                .coins(owner, asset_id, amount, remaining_input_slots)
+                .coins(owner, asset_id, amount, remaining_input_slots, false)
                 .await?;
 
             for coin in selected_coins
@@ -909,23 +913,25 @@ where
         let mut total_base_asset = 0u64;
 
         for input in self.tx.inputs() {
-            let Some(amount) = input.amount() else {
-                continue;
-            };
-            let Some(asset_id) = input.asset_id(&base_asset_id) else {
-                continue;
-            };
-            let Some(owner) = input.input_owner() else {
-                continue;
-            };
+            if input_is_spendable_as_fee(input) {
+                let Some(amount) = input.amount() else {
+                    continue;
+                };
+                let Some(asset_id) = input.asset_id(&base_asset_id) else {
+                    continue;
+                };
+                let Some(owner) = input.input_owner() else {
+                    continue;
+                };
 
-            if asset_id == &base_asset_id && &fee_payer_account.owner() == owner {
-                total_base_asset =
-                    total_base_asset.checked_add(amount).ok_or_else(|| {
-                        anyhow::anyhow!(
+                if asset_id == &base_asset_id && &fee_payer_account.owner() == owner {
+                    total_base_asset =
+                        total_base_asset.checked_add(amount).ok_or_else(|| {
+                            anyhow::anyhow!(
                         "The total base asset amount used by the transaction is too big"
                     )
-                    })?;
+                        })?;
+                }
             }
         }
 
@@ -949,6 +955,15 @@ where
             }
 
             let remaining_input_slots = self.remaining_input_slots()?;
+            if remaining_input_slots == 0 {
+                return Err(CoinsQueryError::MaxCoinsReached {
+                    owner: fee_payer_account.owner(),
+                    asset_id: base_asset_id,
+                    collected_amount: total_base_asset.into(),
+                    max: self.arguments.consensus_parameters.tx_params().max_inputs(),
+                }
+                .into());
+            }
 
             let how_much_to_add = need_to_cover.saturating_sub(total_base_asset);
             let coins = self
@@ -958,6 +973,7 @@ where
                     base_asset_id,
                     how_much_to_add,
                     remaining_input_slots,
+                    true,
                 )
                 .await?;
 
@@ -992,6 +1008,10 @@ where
 
         Ok(self)
     }
+}
+
+fn input_is_spendable_as_fee(input: &Input) -> bool {
+    !input.is_message_data_signed() && !input.is_message_data_predicate()
 }
 
 fn has_duplicates<T, F, K>(items: &[T], extractor: F) -> bool

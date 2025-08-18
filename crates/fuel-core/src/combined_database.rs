@@ -6,15 +6,16 @@ use crate::state::{
 
 use crate::{
     database::{
+        Database,
+        GenesisDatabase,
+        Result as DatabaseResult,
         database_description::{
+            compression::CompressionDatabase,
             gas_price::GasPriceDatabase,
             off_chain::OffChain,
             on_chain::OnChain,
             relayer::Relayer,
         },
-        Database,
-        GenesisDatabase,
-        Result as DatabaseResult,
     },
     service::DbType,
 };
@@ -25,6 +26,7 @@ use fuel_core_chain_config::{
 };
 #[cfg(feature = "backup")]
 use fuel_core_services::TraceErr;
+use fuel_core_storage::Result as StorageResult;
 #[cfg(feature = "test-helpers")]
 use fuel_core_storage::tables::{
     Coins,
@@ -34,8 +36,10 @@ use fuel_core_storage::tables::{
     ContractsState,
     Messages,
 };
-use fuel_core_storage::Result as StorageResult;
-use fuel_core_types::fuel_types::BlockHeight;
+use fuel_core_types::{
+    blockchain::primitives::DaBlockHeight,
+    fuel_types::BlockHeight,
+};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -55,6 +59,7 @@ pub struct CombinedDatabase {
     off_chain: Database<OffChain>,
     relayer: Database<Relayer>,
     gas_price: Database<GasPriceDatabase>,
+    compression: Database<CompressionDatabase>,
 }
 
 impl CombinedDatabase {
@@ -63,12 +68,14 @@ impl CombinedDatabase {
         off_chain: Database<OffChain>,
         relayer: Database<Relayer>,
         gas_price: Database<GasPriceDatabase>,
+        compression: Database<CompressionDatabase>,
     ) -> Self {
         Self {
             on_chain,
             off_chain,
             relayer,
             gas_price,
+            compression,
         }
     }
 
@@ -78,6 +85,7 @@ impl CombinedDatabase {
         crate::state::rocks_db::RocksDb::<OffChain>::prune(path)?;
         crate::state::rocks_db::RocksDb::<Relayer>::prune(path)?;
         crate::state::rocks_db::RocksDb::<GasPriceDatabase>::prune(path)?;
+        crate::state::rocks_db::RocksDb::<CompressionDatabase>::prune(path)?;
         Ok(())
     }
 
@@ -118,6 +126,9 @@ impl CombinedDatabase {
         crate::state::rocks_db::RocksDb::<GasPriceDatabase>::backup(db_dir, temp_dir)
             .trace_err("Failed to backup gas-price database")?;
 
+        crate::state::rocks_db::RocksDb::<CompressionDatabase>::backup(db_dir, temp_dir)
+            .trace_err("Failed to backup compression database")?;
+
         Ok(())
     }
 
@@ -149,22 +160,28 @@ impl CombinedDatabase {
         temp_restore_dir: &std::path::Path,
     ) -> crate::database::Result<()> {
         crate::state::rocks_db::RocksDb::<OnChain>::restore(temp_restore_dir, backup_dir)
-            .trace_err("Failed to backup on-chain database")?;
+            .trace_err("Failed to restore on-chain database")?;
 
         crate::state::rocks_db::RocksDb::<OffChain>::restore(
             temp_restore_dir,
             backup_dir,
         )
-        .trace_err("Failed to backup off-chain database")?;
+        .trace_err("Failed to restore off-chain database")?;
 
         crate::state::rocks_db::RocksDb::<Relayer>::restore(temp_restore_dir, backup_dir)
-            .trace_err("Failed to backup relayer database")?;
+            .trace_err("Failed to restore relayer database")?;
 
         crate::state::rocks_db::RocksDb::<GasPriceDatabase>::restore(
             temp_restore_dir,
             backup_dir,
         )
-        .trace_err("Failed to backup gas-price database")?;
+        .trace_err("Failed to restore gas-price database")?;
+
+        crate::state::rocks_db::RocksDb::<CompressionDatabase>::restore(
+            temp_restore_dir,
+            backup_dir,
+        )
+        .trace_err("Failed to restore compression database")?;
 
         Ok(())
     }
@@ -201,7 +218,7 @@ impl CombinedDatabase {
         )?;
         let relayer = Database::open_rocksdb(
             path,
-            StateRewindPolicy::NoRewind,
+            state_rewind_policy,
             DatabaseConfig {
                 max_fds,
                 ..database_config
@@ -215,11 +232,20 @@ impl CombinedDatabase {
                 ..database_config
             },
         )?;
+        let compression = Database::open_rocksdb(
+            path,
+            state_rewind_policy,
+            DatabaseConfig {
+                max_fds,
+                ..database_config
+            },
+        )?;
         Ok(Self {
             on_chain,
             off_chain,
             relayer,
             gas_price,
+            compression,
         })
     }
 
@@ -234,6 +260,7 @@ impl CombinedDatabase {
             off_chain: Database::rocksdb_temp(state_rewind_policy, database_config)?,
             relayer: Default::default(),
             gas_price: Default::default(),
+            compression: Default::default(),
         })
     }
 
@@ -278,6 +305,7 @@ impl CombinedDatabase {
             Database::in_memory(),
             Database::in_memory(),
             Database::in_memory(),
+            Database::in_memory(),
         )
     }
 
@@ -286,11 +314,16 @@ impl CombinedDatabase {
         self.off_chain.check_version()?;
         self.relayer.check_version()?;
         self.gas_price.check_version()?;
+        self.compression.check_version()?;
         Ok(())
     }
 
     pub fn on_chain(&self) -> &Database<OnChain> {
         &self.on_chain
+    }
+
+    pub fn compression(&self) -> &Database<CompressionDatabase> {
+        &self.compression
     }
 
     #[cfg(any(feature = "test-helpers", test))]
@@ -391,14 +424,18 @@ impl CombinedDatabase {
 
             let gas_price_chain_height =
                 self.gas_price().latest_height_from_metadata()?;
+            let gas_price_rolled_back =
+                is_equal_or_none(gas_price_chain_height, target_block_height);
 
-            let gas_price_rolled_back = gas_price_chain_height.is_none()
-                || gas_price_chain_height.expect("We checked height before")
-                    == target_block_height;
+            let compression_db_height =
+                self.compression().latest_height_from_metadata()?;
+            let compression_db_rolled_back =
+                is_equal_or_none(compression_db_height, target_block_height);
 
             if on_chain_height == target_block_height
                 && off_chain_height == target_block_height
                 && gas_price_rolled_back
+                && compression_db_rolled_back
             {
                 break;
             }
@@ -420,7 +457,16 @@ impl CombinedDatabase {
             if let Some(gas_price_chain_height) = gas_price_chain_height {
                 if gas_price_chain_height < target_block_height {
                     return Err(anyhow::anyhow!(
-                        "gas-price-chain database height({gas_price_chain_height}) \
+                        "gas-price database height({gas_price_chain_height}) \
+                        is less than target height({target_block_height})"
+                    ));
+                }
+            }
+
+            if let Some(compression_db_height) = compression_db_height {
+                if compression_db_height < target_block_height {
+                    return Err(anyhow::anyhow!(
+                        "compression database height({compression_db_height}) \
                         is less than target height({target_block_height})"
                     ));
                 }
@@ -437,6 +483,55 @@ impl CombinedDatabase {
             if let Some(gas_price_chain_height) = gas_price_chain_height {
                 if gas_price_chain_height > target_block_height {
                     self.gas_price().rollback_last_block()?;
+                }
+            }
+
+            if let Some(compression_db_height) = compression_db_height {
+                if compression_db_height > target_block_height {
+                    self.compression().rollback_last_block()?;
+                }
+            }
+        }
+
+        if shutdown_listener.is_cancelled() {
+            return Err(anyhow::anyhow!(
+                "Stop the rollback due to shutdown signal received"
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Rollbacks the state of the relayer to a specific block height.
+    pub fn rollback_relayer_to<S>(
+        &self,
+        target_da_height: DaBlockHeight,
+        shutdown_listener: &mut S,
+    ) -> anyhow::Result<()>
+    where
+        S: ShutdownListener,
+    {
+        while !shutdown_listener.is_cancelled() {
+            let relayer_db_height = self.relayer().latest_height_from_metadata()?;
+            let relayer_db_rolled_back =
+                is_equal_or_none(relayer_db_height, target_da_height);
+
+            if relayer_db_rolled_back {
+                break;
+            }
+
+            if let Some(relayer_db_height) = relayer_db_height {
+                if relayer_db_height < target_da_height {
+                    return Err(anyhow::anyhow!(
+                        "relayer database height({relayer_db_height}) \
+                        is less than target height({target_da_height})"
+                    ));
+                }
+            }
+
+            if let Some(relayer_db_height) = relayer_db_height {
+                if relayer_db_height > target_da_height {
+                    self.relayer().rollback_last_block()?;
                 }
             }
         }
@@ -484,14 +579,22 @@ impl CombinedDatabase {
             }
 
             // If both off-chain and gas price heights are synced, break
-            if off_chain_height.map_or(true, |h| h <= on_chain_height)
-                && gas_price_height.map_or(true, |h| h <= on_chain_height)
+            if off_chain_height.is_none_or(|h| h <= on_chain_height)
+                && gas_price_height.is_none_or(|h| h <= on_chain_height)
             {
                 break;
             }
         }
 
         Ok(())
+    }
+
+    pub fn shutdown(self) {
+        self.on_chain.shutdown();
+        self.off_chain.shutdown();
+        self.relayer.shutdown();
+        self.gas_price.shutdown();
+        self.compression.shutdown();
     }
 }
 
@@ -519,12 +622,19 @@ impl CombinedGenesisDatabase {
     }
 }
 
+fn is_equal_or_none<T: PartialEq>(maybe_left: Option<T>, right: T) -> bool {
+    maybe_left.map(|left| left == right).unwrap_or(true)
+}
+
 #[allow(non_snake_case)]
 #[cfg(feature = "backup")]
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fuel_core_storage::StorageAsMut;
+    use fuel_core_storage::{
+        StorageAsMut,
+        StorageAsRef,
+    };
     use fuel_core_types::{
         entities::coins::coin::CompressedCoin,
         fuel_tx::UtxoId,
@@ -565,7 +675,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut restored_on_chain_db = restored_db.on_chain();
+        let restored_on_chain_db = restored_db.on_chain();
         let restored_value = restored_on_chain_db
             .storage::<Coins>()
             .get(&key)
@@ -673,7 +783,7 @@ mod tests {
     }
 
     #[test]
-    fn backup__cannot_backup_while_db_is_opened() {
+    fn backup__should_be_successful_if_db_is_already_opened() {
         // given
         let db_dir = TempDir::new().unwrap();
         let mut combined_db = CombinedDatabase::open(
@@ -696,8 +806,8 @@ mod tests {
         // no drop for combined_db
 
         // then
-        CombinedDatabase::backup(db_dir.path(), backup_dir.path())
-            .expect_err("Backup should fail");
+        let res = CombinedDatabase::backup(db_dir.path(), backup_dir.path());
+        assert!(res.is_ok());
 
         // cleanup
         std::fs::remove_dir_all(db_dir.path()).unwrap();

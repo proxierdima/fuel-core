@@ -10,26 +10,26 @@ use fuel_core_storage::transactional::AtomicView;
 use fuel_core_types::{
     blockchain::transaction::TransactionExt,
     fuel_asm::{
-        op,
         GMArgs,
         GTFArgs,
         RegId,
+        op,
     },
     fuel_crypto::{
         coins_bip32::ecdsa::signature::Signer,
         *,
     },
     fuel_tx::{
-        input::coin::{
-            CoinPredicate,
-            CoinSigned,
-        },
         AssetId,
         Finalizable,
         Input,
         Output,
         Transaction,
         TransactionBuilder,
+        input::coin::{
+            CoinPredicate,
+            CoinSigned,
+        },
     },
     fuel_types::{
         Immediate12,
@@ -45,9 +45,9 @@ use fuel_core_types::{
     },
 };
 use rand::{
-    rngs::StdRng,
     Rng,
     SeedableRng,
+    rngs::StdRng,
 };
 use test_helpers::builder::{
     TestContext,
@@ -108,7 +108,7 @@ fn generate_transactions(nb_txs: u64, rng: &mut StdRng) -> Vec<Transaction> {
         let mut tx = TransactionBuilder::script(vec![], vec![])
             .script_gas_limit(10000)
             .add_input(Input::coin_predicate(
-                rng.gen(),
+                rng.r#gen(),
                 owner,
                 1000,
                 Default::default(),
@@ -117,7 +117,7 @@ fn generate_transactions(nb_txs: u64, rng: &mut StdRng) -> Vec<Transaction> {
                 predicate.clone(),
                 predicate_data.clone(),
             ))
-            .add_output(Output::coin(rng.gen(), 50, AssetId::default()))
+            .add_output(Output::coin(rng.r#gen(), 50, AssetId::default()))
             .finalize();
         tx.estimate_predicates(
             &checked_parameters(),
@@ -150,7 +150,7 @@ fn main() {
     test_builder.initial_coins.extend(
         transactions
             .iter()
-            .flat_map(|t| t.inputs().unwrap())
+            .flat_map(|t| t.inputs().into_owned())
             .filter_map(|input| {
                 if let Input::CoinSigned(CoinSigned {
                     amount,
@@ -174,9 +174,9 @@ fn main() {
                         output_index: utxo_id.output_index(),
                         tx_pointer_block_height: tx_pointer.block_height(),
                         tx_pointer_tx_idx: tx_pointer.tx_index(),
-                        owner: *owner,
-                        amount: *amount,
-                        asset_id: *asset_id,
+                        owner: owner.into(),
+                        amount,
+                        asset_id,
                     })
                 } else {
                     None

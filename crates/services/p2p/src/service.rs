@@ -37,7 +37,6 @@ use crate::{
 use anyhow::anyhow;
 use fuel_core_metrics::p2p_metrics::set_blocks_requested;
 use fuel_core_services::{
-    stream::BoxStream,
     AsyncProcessor,
     RunnableService,
     RunnableTask,
@@ -46,6 +45,7 @@ use fuel_core_services::{
     SyncProcessor,
     TaskNextAction,
     TraceErr,
+    stream::BoxStream,
 };
 use fuel_core_storage::transactional::AtomicView;
 use fuel_core_types::{
@@ -60,10 +60,6 @@ use fuel_core_types::{
         ChainId,
     },
     services::p2p::{
-        peer_reputation::{
-            AppScore,
-            PeerReport,
-        },
         BlockHeightHeartbeatData,
         GossipData,
         GossipsubMessageAcceptance,
@@ -72,20 +68,24 @@ use fuel_core_types::{
         PeerId as FuelPeerId,
         TransactionGossipData,
         Transactions,
+        peer_reputation::{
+            AppScore,
+            PeerReport,
+        },
     },
 };
 use futures::{
-    future::BoxFuture,
     StreamExt,
+    future::BoxFuture,
 };
 use libp2p::{
+    PeerId,
     gossipsub::{
         MessageAcceptance,
         MessageId,
         PublishError,
     },
     request_response::InboundRequestId,
-    PeerId,
 };
 use std::{
     fmt::Debug,
@@ -488,17 +488,6 @@ where
                 let _ = self.broadcast.tx_broadcast(next_transaction);
             }
             GossipsubMessage::TxPreConfirmations(confirmations) => {
-                // Continue to broadcast the message to the network
-                // without validation of the pre confirmation, because maybe we
-                // joined the network after delegation key was registered for this preconfirmation.
-                let fuel_peer_id: Vec<u8> = peer_id.into();
-                let _ = self.p2p_service.report_message(
-                    GossipsubMessageInfo {
-                        message_id: message_id.clone(),
-                        peer_id: fuel_peer_id.into(),
-                    },
-                    GossipsubMessageAcceptance::Accept,
-                );
                 let data = GossipData::new(confirmations, peer_id, message_id);
                 let _ = self.broadcast.pre_confirmation_broadcast(data);
             }
@@ -876,6 +865,7 @@ where
             database_read_threads,
             tx_pool_threads,
             metrics,
+            cache_size,
             ..
         } = config;
 
@@ -929,7 +919,12 @@ where
             heartbeat_max_time_since_last,
             next_check_time,
             heartbeat_peer_reputation_config,
-            cached_view: Arc::new(CachedView::new(614 * 10, metrics)),
+            cached_view: Arc::new(CachedView::new(
+                cache_size
+                    .map(|cache_size| cache_size.into())
+                    .unwrap_or(1_535),
+                metrics,
+            )),
         };
         Ok(task)
     }
@@ -971,9 +966,9 @@ where
                     }
                     Some(TaskRequest::BroadcastPreConfirmations(pre_confirmation_message)) => {
                         let broadcast = GossipsubBroadcastRequest::TxPreConfirmations(pre_confirmation_message);
-                        let result = self.p2p_service.publish_message(broadcast);
+                        let result = self.p2p_service.publish_message(broadcast.clone());
                         if let Err(e) = result {
-                            tracing::error!("Got an error during pre-confirmation message broadcasting {}", e);
+                            tracing::error!("Got an error during pre-confirmation message broadcasting {:?}: {}", broadcast, e);
                         }
                     }
                     Some(TaskRequest::GetSealedHeaders { block_height_range, channel}) => {
@@ -1205,7 +1200,9 @@ impl SharedState {
                 "Invalid response from peer {request_response_protocol_error:?}"
             )),
             Ok(Err(response_error_code)) => {
-                warn!("Peer {peer_id:?} failed to respond with sealed headers: {response_error_code:?}");
+                warn!(
+                    "Peer {peer_id:?} failed to respond with sealed headers: {response_error_code:?}"
+                );
                 Ok(None)
             }
             Ok(Ok(headers)) => Ok(Some(headers)),

@@ -1,17 +1,16 @@
 //! A simple contract that mints requested subtokens.
 
 use fuel_core_client::client::{
-    types::TransactionStatus,
     FuelClient,
+    types::TransactionStatus,
 };
 use fuel_core_types::{
     fuel_asm::{
-        op,
         GTFArgs,
         RegId,
+        op,
     },
     fuel_tx::{
-        field::Outputs,
         Bytes32,
         ContractId,
         Finalizable,
@@ -19,13 +18,15 @@ use fuel_core_types::{
         Output,
         Receipt,
         StorageSlot,
+        SubAssetId,
         Transaction,
         TransactionBuilder,
+        field::Outputs,
     },
     fuel_types::{
+        BlockHeight,
         bytes::WORD_SIZE,
         canonical::Serialize,
-        BlockHeight,
     },
     fuel_vm::{
         Call,
@@ -55,13 +56,13 @@ pub async fn deploy(
 
     let tx = TransactionBuilder::create(
         code.into(),
-        rng.gen(),
+        rng.r#gen(),
         vec![StorageSlot::new(Bytes32::zeroed(), Bytes32::zeroed())],
     )
     .maturity(Default::default())
     .add_unsigned_coin_input(
         SecretKey::random(rng),
-        rng.gen(),
+        rng.r#gen(),
         u32::MAX as u64,
         *base_asset_id,
         Default::default(),
@@ -81,7 +82,7 @@ pub async fn deploy(
 pub fn mint_tx(
     rng: &mut rand::rngs::StdRng,
     contract_id: ContractId,
-    sub_asset_id: Bytes32,
+    sub_asset_id: SubAssetId,
     amount: u64,
 ) -> Transaction {
     let script = [
@@ -107,15 +108,15 @@ pub fn mint_tx(
         .maturity(Default::default())
         .add_unsigned_coin_input(
             SecretKey::random(rng),
-            rng.gen(),
+            rng.r#gen(),
             u32::MAX as u64,
             Default::default(),
             Default::default(),
         )
         .add_input(Input::contract(
-            rng.gen(),
-            rng.gen(),
-            rng.gen(),
+            rng.r#gen(),
+            rng.r#gen(),
+            rng.r#gen(),
             Default::default(),
             contract_id,
         ))
@@ -128,7 +129,7 @@ pub async fn mint(
     client: &FuelClient,
     rng: &mut rand::rngs::StdRng,
     contract_id: ContractId,
-    sub_asset_id: Bytes32,
+    sub_asset_id: SubAssetId,
     amount: u64,
 ) -> BlockHeight {
     let tx = mint_tx(rng, contract_id, sub_asset_id, amount);

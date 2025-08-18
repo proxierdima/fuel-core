@@ -22,10 +22,13 @@ pub mod test_context;
 pub mod tests;
 
 pub fn main_body(config: SuiteConfig, mut args: Arguments) {
-    fn with_cloned(
+    fn with_cloned<T>(
         config: &SuiteConfig,
-        f: impl FnOnce(SuiteConfig) -> anyhow::Result<(), Failed>,
-    ) -> impl FnOnce() -> anyhow::Result<(), Failed> {
+        f: T,
+    ) -> impl FnOnce() -> anyhow::Result<(), Failed> + use<T>
+    where
+        T: FnOnce(SuiteConfig) -> anyhow::Result<(), Failed>,
+    {
         let config = config.clone();
         move || f(config)
     }
@@ -66,7 +69,7 @@ pub fn main_body(config: SuiteConfig, mut args: Arguments) {
             with_cloned(&config, |config| {
                 async_execute(async {
                     let ctx = TestContext::new(config).await;
-                    tests::transfers::transfer_back(&ctx).await
+                    tests::script::receipts(&ctx).await
                 })
             }),
         ),
@@ -121,7 +124,7 @@ pub fn main_body(config: SuiteConfig, mut args: Arguments) {
         ),
     ];
 
-    libtest_mimic::run(&args, tests).exit();
+    libtest_mimic::run(&args, tests).exit_if_failed();
 }
 
 pub fn load_config_env() -> SuiteConfig {

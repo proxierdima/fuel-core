@@ -10,22 +10,22 @@ use fuel_core::{
     },
 };
 use fuel_core_client::client::{
+    FuelClient,
     pagination::{
         PageDirection,
         PaginationRequest,
     },
     types::TransactionStatus,
-    FuelClient,
 };
 use fuel_core_poa::Trigger;
 use fuel_core_storage::{
+    StorageAsMut,
     tables::{
         FuelBlocks,
         SealedBlockConsensus,
     },
     transactional::WriteTransaction,
     vm_storage::VmStorageRequirements,
-    StorageAsMut,
 };
 use fuel_core_types::{
     blockchain::{
@@ -37,9 +37,10 @@ use fuel_core_types::{
     signer::SignMode,
     tai64::Tai64,
 };
+use futures::StreamExt;
 use itertools::{
-    rev,
     Itertools,
+    rev,
 };
 use rstest::rstest;
 use std::{
@@ -49,8 +50,8 @@ use std::{
 use test_helpers::send_graph_ql_query;
 
 use rand::{
-    rngs::StdRng,
     SeedableRng,
+    rngs::StdRng,
 };
 
 #[tokio::test]
@@ -273,6 +274,30 @@ async fn produce_block_overflow_time() {
     ));
 }
 
+#[tokio::test]
+async fn new_blocks_subscription_returns_blocks() {
+    let mut config = Config::local_node();
+    config.block_production = Trigger::Instant;
+    config.debug = true;
+
+    let srv = FuelService::from_database(Database::default(), config)
+        .await
+        .unwrap();
+
+    let client = FuelClient::from(srv.bound_address);
+
+    // Given
+    let mut new_blocks = client.new_blocks_subscription().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    // When
+    client.produce_blocks(1, None).await.unwrap();
+
+    // Then
+    let block_1 = new_blocks.next().await.unwrap().unwrap();
+    assert_eq!(*block_1.sealed_block.entity.header().height(), 1u32.into());
+}
+
 #[rstest]
 #[tokio::test]
 async fn block_connection_5(
@@ -350,7 +375,10 @@ mod full_block {
     use super::*;
     use cynic::QueryBuilder;
     use fuel_core_client::client::{
+        FuelClient,
         schema::{
+            BlockId,
+            U32,
             block::{
                 BlockByHeightArgs,
                 BlockByHeightArgsFields,
@@ -359,10 +387,7 @@ mod full_block {
             },
             schema,
             tx::OpaqueTransaction,
-            BlockId,
-            U32,
         },
-        FuelClient,
     };
     use fuel_core_executor::executor::max_tx_count;
     use fuel_core_txpool::config::{
@@ -443,7 +468,7 @@ mod full_block {
         let local_node_config = Config::local_node();
         let txpool = fuel_core_txpool::config::Config {
             pool_limits: PoolLimits {
-                max_txs: usize::MAX,
+                max_txs: 2_000_000,
                 max_gas: u64::MAX,
                 max_bytes_size: usize::MAX,
             },

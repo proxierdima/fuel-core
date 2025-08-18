@@ -23,7 +23,7 @@ use std::{
 use super::*;
 
 fn div_ceil(divisor: usize, dividend: usize) -> usize {
-    (divisor + (dividend - 1)) / dividend
+    divisor.div_ceil(dividend)
 }
 
 #[tokio::test]
@@ -1493,12 +1493,6 @@ impl PeerReportTestBuilder {
             block_count: 1,
             debug: false,
         }
-    }
-
-    #[allow(dead_code)]
-    pub fn debug(mut self) -> Self {
-        self.debug = true;
-        self
     }
 
     pub fn with_get_sealed_block_headers(

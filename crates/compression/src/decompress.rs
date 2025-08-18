@@ -1,12 +1,12 @@
 use crate::{
+    VersionedBlockPayload,
+    VersionedCompressedBlock,
     config::Config,
     ports::{
         HistoryLookup,
         TemporalRegistry,
     },
     registry::TemporalRegistryAll,
-    VersionedBlockPayload,
-    VersionedCompressedBlock,
 };
 use fuel_core_types::{
     blockchain::block::PartialFuelBlock,
@@ -18,8 +18,17 @@ use fuel_core_types::{
         RegistryKey,
     },
     fuel_tx::{
+        AssetId,
+        CompressedUtxoId,
+        Mint,
+        ScriptCode,
+        Transaction,
+        TxPointer as FuelTxPointer,
+        UtxoId,
         field::TxPointer,
         input::{
+            AsField,
+            PredicateCode,
             coin::{
                 Coin,
                 CoinSpecification,
@@ -28,16 +37,7 @@ use fuel_core_types::{
                 Message,
                 MessageSpecification,
             },
-            AsField,
-            PredicateCode,
         },
-        AssetId,
-        CompressedUtxoId,
-        Mint,
-        ScriptCode,
-        Transaction,
-        TxPointer as FuelTxPointer,
-        UtxoId,
     },
     fuel_types::{
         Address,
@@ -46,8 +46,29 @@ use fuel_core_types::{
     tai64::Tai64,
 };
 
-pub trait DecompressDb: TemporalRegistryAll + HistoryLookup {}
-impl<T> DecompressDb for T where T: TemporalRegistryAll + HistoryLookup {}
+#[cfg(not(feature = "fault-proving"))]
+pub mod not_fault_proving {
+    use super::*;
+    pub trait DecompressDb: TemporalRegistryAll + HistoryLookup {}
+    impl<T> DecompressDb for T where T: TemporalRegistryAll + HistoryLookup {}
+}
+
+#[cfg(feature = "fault-proving")]
+pub mod fault_proving {
+    use super::*;
+    use crate::ports::GetRegistryRoot;
+    pub trait DecompressDb:
+        TemporalRegistryAll + HistoryLookup + GetRegistryRoot
+    {
+    }
+    impl<T> DecompressDb for T where T: TemporalRegistryAll + HistoryLookup + GetRegistryRoot {}
+}
+
+#[cfg(feature = "fault-proving")]
+use fault_proving::DecompressDb;
+
+#[cfg(not(feature = "fault-proving"))]
+use not_fault_proving::DecompressDb;
 
 /// This must be called for all decompressed blocks in sequence, otherwise the result will be garbage.
 pub async fn decompress<D>(
@@ -58,8 +79,6 @@ pub async fn decompress<D>(
 where
     D: DecompressDb,
 {
-    // TODO: merkle root verification: https://github.com/FuelLabs/fuel-core/issues/2232
-
     block
         .registrations()
         .write_to_registry(&mut db, block.consensus_header().time)?;
@@ -91,6 +110,27 @@ where
         );
     } else {
         anyhow::bail!("Last transaction is not a mint");
+    }
+
+    #[cfg(feature = "fault-proving")]
+    {
+        match block {
+            VersionedCompressedBlock::V0(_) => {}
+            VersionedCompressedBlock::V1(ref block) => {
+                let registry_root_after_decompression = ctx
+                    .db
+                    .registry_root()
+                    .map_err(|e| anyhow::anyhow!("Failed to get registry root: {}", e))?;
+                let registry_root_after_compression = block.header.registry_root;
+                if registry_root_after_decompression != registry_root_after_compression {
+                    anyhow::bail!(
+                        "Registry root mismatch. registry root after decompression: {:?}, registry root after compression: {:?}",
+                        registry_root_after_decompression,
+                        registry_root_after_compression
+                    );
+                }
+            }
+        }
     }
 
     Ok(PartialFuelBlock {
@@ -251,11 +291,11 @@ mod tests {
     use fuel_core_types::{
         fuel_compression::RegistryKey,
         fuel_tx::{
-            input::PredicateCode,
             Address,
             AssetId,
             ContractId,
             ScriptCode,
+            input::PredicateCode,
         },
     };
     use serde::{
@@ -331,6 +371,7 @@ mod tests {
     #[tokio::test]
     async fn decompress_block_with_unknown_version() {
         #[derive(Clone, Serialize, Deserialize)]
+        #[allow(clippy::large_enum_variant)]
         enum CompressedBlockWithNewVersions {
             V0(crate::CompressedBlockPayloadV0),
             NewVersion(u32),

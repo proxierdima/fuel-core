@@ -9,6 +9,7 @@ pub mod p2p;
 pub mod preconfirmation;
 pub mod relayer;
 pub mod shared_sequencer;
+pub mod transaction_status;
 #[cfg(feature = "std")]
 pub mod txpool;
 
@@ -50,5 +51,16 @@ impl<Result, Changes> Uncommitted<Result, Changes> {
     /// Discards the result and return storage changes.
     pub fn into_changes(self) -> Changes {
         self.changes
+    }
+
+    /// Discards the result and return storage changes.
+    pub fn map_result<F: FnOnce(Result) -> NewResult, NewResult>(
+        self,
+        f: F,
+    ) -> Uncommitted<NewResult, Changes> {
+        Uncommitted {
+            result: f(self.result),
+            changes: self.changes,
+        }
     }
 }

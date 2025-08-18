@@ -1,7 +1,9 @@
 #![allow(unused_variables)]
 
 use crate::{
+    FuelService,
     cli::{
+        ShutdownListener,
         default_db_path,
         run::{
             consensus::PoATriggerArgs,
@@ -9,9 +11,7 @@ use crate::{
             tx_pool::TxPoolArgs,
             tx_status_manager::TxStatusManagerArgs,
         },
-        ShutdownListener,
     },
-    FuelService,
 };
 use anyhow::Context;
 use clap::Parser;
@@ -22,17 +22,19 @@ use fuel_core::{
         CombinedDatabaseConfig,
     },
     fuel_core_graphql_api::{
-        worker_service::DaCompressionConfig,
         Costs,
         ServiceConfig as GraphQLConfig,
     },
     producer::Config as ProducerConfig,
     service::{
-        config::Trigger,
-        genesis::NotifyCancel,
         Config,
         DbType,
         RelayerConsensusConfig,
+        config::{
+            DaCompressionMode,
+            Trigger,
+        },
+        genesis::NotifyCancel,
     },
     state::rocks_db::{
         ColumnsPolicy,
@@ -66,21 +68,24 @@ use fuel_core_types::{
     signer::SignMode,
 };
 use pyroscope::{
-    pyroscope::PyroscopeAgentRunning,
     PyroscopeAgent,
+    pyroscope::PyroscopeAgentRunning,
 };
 use pyroscope_pprofrs::{
-    pprof_backend,
     PprofConfig,
+    pprof_backend,
 };
 use rlimit::{
-    getrlimit,
     Resource,
+    getrlimit,
 };
 use std::{
     env,
     net,
-    num::NonZeroU64,
+    num::{
+        NonZeroU32,
+        NonZeroU64,
+    },
     path::PathBuf,
     str::FromStr,
     time::Duration,
@@ -108,6 +113,8 @@ mod shared_sequencer;
 mod consensus;
 mod gas_price;
 mod graphql;
+#[cfg(feature = "p2p")]
+mod preconfirmation_signature_service;
 mod profiling;
 #[cfg(feature = "relayer")]
 mod relayer;
@@ -194,6 +201,10 @@ pub struct Command {
     #[arg(long = "historical-execution", env)]
     pub historical_execution: bool,
 
+    /// Allows expensive subscriptions to be used via GraphQL.
+    #[arg(long = "expensive-subscriptions", env)]
+    pub expensive_subscriptions: bool,
+
     /// Enable logging of backtraces from vm errors
     #[arg(long = "vm-backtrace", env)]
     #[deprecated]
@@ -234,6 +245,10 @@ pub struct Command {
     #[arg(long = "da-compression", env)]
     pub da_compression: Option<humantime::Duration>,
 
+    /// The starting height of the compression service.
+    #[arg(long = "da-compression-starting-height", env)]
+    pub da_compression_starting_height: Option<NonZeroU32>,
+
     /// A new block is produced instantly when transactions are available.
     #[clap(flatten)]
     pub poa_trigger: PoATriggerArgs,
@@ -271,6 +286,11 @@ pub struct Command {
     #[cfg_attr(feature = "p2p", clap(flatten))]
     #[cfg(feature = "p2p")]
     pub sync_args: p2p::SyncArgs,
+
+    #[cfg_attr(feature = "p2p", clap(flatten))]
+    #[cfg(feature = "p2p")]
+    pub pre_confirmation_signature_service_args:
+        preconfirmation_signature_service::PreconfirmationArgs,
 
     #[cfg_attr(feature = "shared-sequencer", clap(flatten))]
     #[cfg(feature = "shared-sequencer")]
@@ -323,6 +343,7 @@ impl Command {
             vm_backtrace: _,
             debug,
             historical_execution,
+            expensive_subscriptions,
             utxo_validation,
             native_executor_version,
             #[cfg(feature = "parallel-executor")]
@@ -332,6 +353,7 @@ impl Command {
             #[cfg(feature = "aws-kms")]
             consensus_aws_kms,
             da_compression,
+            da_compression_starting_height,
             poa_trigger,
             predefined_blocks_path,
             coinbase_recipient,
@@ -341,6 +363,8 @@ impl Command {
             p2p_args,
             #[cfg(feature = "p2p")]
             sync_args,
+            #[cfg(feature = "p2p")]
+            pre_confirmation_signature_service_args,
             #[cfg(feature = "shared-sequencer")]
             shared_sequencer_args,
             metrics,
@@ -404,6 +428,17 @@ impl Command {
             metrics.is_enabled(Module::P2P),
         )?;
 
+        #[cfg(feature = "p2p")]
+        let preconfirmation_signature_service_config =
+            fuel_core_poa::pre_confirmation_signature_service::config::Config {
+                key_rotation_interval: *pre_confirmation_signature_service_args
+                    .key_rotation_interval,
+                key_expiration_interval: *pre_confirmation_signature_service_args
+                    .key_expiration_interval,
+                echo_delegation_interval: *pre_confirmation_signature_service_args
+                    .echo_delegation_interval,
+            };
+
         let trigger: Trigger = poa_trigger.into();
 
         if trigger != Trigger::Never {
@@ -452,15 +487,20 @@ impl Command {
             }
         };
 
-        if let Ok(signer_address) = consensus_signer.address() {
-            if let Some(address) = signer_address {
-                info!(
-                    "Consensus signer is specified and its address is {}",
-                    address
+        match consensus_signer.address() {
+            Ok(signer_address) => {
+                if let Some(address) = signer_address {
+                    info!(
+                        "Consensus signer is specified and its address is {}",
+                        address
+                    );
+                }
+            }
+            _ => {
+                warn!(
+                    "Consensus Signer is specified but it was not possible to retrieve its address"
                 );
             }
-        } else {
-            warn!("Consensus Signer is specified but it was not possible to retrieve its address");
         };
 
         if consensus_signer.is_available() && trigger == Trigger::Never {
@@ -526,12 +566,14 @@ impl Command {
         let gas_price_metrics = metrics.is_enabled(Module::GasPrice);
 
         let da_compression = match da_compression {
-            Some(retention) => {
-                DaCompressionConfig::Enabled(fuel_core_compression::Config {
-                    temporal_registry_retention: retention.into(),
-                })
-            }
-            None => DaCompressionConfig::Disabled,
+            Some(retention_duration) => DaCompressionMode::Enabled(
+                fuel_core::service::config::DaCompressionConfig {
+                    retention_duration: retention_duration.into(),
+                    starting_height: da_compression_starting_height,
+                    metrics: metrics.is_enabled(Module::Compression),
+                },
+            ),
+            None => DaCompressionMode::Disabled,
         };
 
         let TxPoolArgs {
@@ -620,6 +662,7 @@ impl Command {
                 addr,
                 number_of_threads: graphql.graphql_number_of_threads,
                 database_batch_size: graphql.database_batch_size,
+                block_subscriptions_queue: graphql.block_subscriptions_queue,
                 max_queries_depth: graphql.graphql_max_depth,
                 max_queries_complexity: graphql.graphql_max_complexity,
                 max_queries_recursive_depth: graphql.graphql_max_recursive_depth,
@@ -668,6 +711,7 @@ impl Command {
             snapshot_reader,
             debug,
             historical_execution,
+            expensive_subscriptions,
             native_executor_version,
             continue_on_error,
             utxo_validation,
@@ -701,6 +745,8 @@ impl Command {
             p2p: p2p_cfg,
             #[cfg(feature = "p2p")]
             sync: sync_args.into(),
+            #[cfg(feature = "p2p")]
+            pre_confirmation_signature_service: preconfirmation_signature_service_config,
             #[cfg(feature = "shared-sequencer")]
             shared_sequencer: shared_sequencer_args.try_into()?,
             consensus_signer,

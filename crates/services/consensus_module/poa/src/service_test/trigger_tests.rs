@@ -236,8 +236,8 @@ async fn interval_trigger_produces_blocks_periodically() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn service__if_commit_result_fails_then_retry_commit_result_after_one_second(
-) -> anyhow::Result<()> {
+async fn service__if_commit_result_fails_then_retry_commit_result_after_one_second()
+-> anyhow::Result<()> {
     // given
     let config = Config {
         trigger: Trigger::Interval {
@@ -376,8 +376,8 @@ async fn interval_trigger_produces_blocks_in_the_future_when_time_is_lagging() {
 }
 
 #[tokio::test]
-async fn interval_trigger_produces_blocks_with_current_time_when_block_production_is_lagging(
-) {
+async fn interval_trigger_produces_blocks_with_current_time_when_block_production_is_lagging()
+ {
     // Given
 
     let block_time = Duration::from_secs(10);
@@ -505,4 +505,81 @@ async fn interval_trigger_even_if_queued_tx_events() {
         block_creation_notifier.notify_waiters();
     });
     block_creation_waiter.notified().await;
+}
+
+#[tokio::test]
+async fn open_trigger__produce_blocks_in_time() {
+    // Given
+    let open_time = Duration::from_secs(10);
+    let quarter_of_open_time = open_time / 4;
+    let offset = Duration::from_secs(1);
+    let mut ctx = DefaultContext::new(Config {
+        trigger: Trigger::Open { period: open_time },
+        signer: SignMode::Key(test_signing_key()),
+        metrics: false,
+        ..Default::default()
+    })
+    .await;
+    time::sleep(offset).await;
+
+    for _ in 0..10 {
+        // When
+        ctx.advance_time_with_tokio();
+        time::sleep(quarter_of_open_time).await;
+        let first_quarter = ctx.block_import.try_recv();
+
+        ctx.advance_time_with_tokio();
+        time::sleep(quarter_of_open_time).await;
+        let second_quarter = ctx.block_import.try_recv();
+
+        ctx.advance_time_with_tokio();
+        time::sleep(quarter_of_open_time).await;
+        let third_quarter = ctx.block_import.try_recv();
+
+        ctx.advance_time_with_tokio();
+        time::sleep(quarter_of_open_time).await;
+        let forth_quarter = ctx.block_import.try_recv();
+
+        // Then
+        assert!(first_quarter.is_err());
+        assert!(second_quarter.is_err());
+        assert!(third_quarter.is_err());
+        assert!(forth_quarter.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn open_trigger__produce_blocks_with_correct_time() {
+    // Given
+    let open_time = Duration::from_secs(10);
+    let offset = Duration::from_secs(1);
+    let mut ctx = DefaultContext::new(Config {
+        trigger: Trigger::Open { period: open_time },
+        signer: SignMode::Key(test_signing_key()),
+        metrics: false,
+        ..Default::default()
+    })
+    .await;
+    let expected_first_block_time = ctx.now().0.checked_add(open_time.as_secs()).unwrap();
+    let expected_second_block_time = expected_first_block_time
+        .checked_add(open_time.as_secs())
+        .unwrap();
+
+    // When
+    time::sleep(offset).await;
+    ctx.advance_time_with_tokio();
+    time::sleep(open_time).await;
+    let first_block = ctx.block_import.try_recv();
+
+    ctx.advance_time_with_tokio();
+    time::sleep(open_time).await;
+    let second_block = ctx.block_import.try_recv();
+
+    // Then
+    assert!(first_block.is_ok());
+    assert!(second_block.is_ok());
+    let first_block_time = first_block.unwrap().entity.header().time();
+    let second_block_time = second_block.unwrap().entity.header().time();
+    assert_eq!(first_block_time.0, expected_first_block_time);
+    assert_eq!(second_block_time.0, expected_second_block_time);
 }

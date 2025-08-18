@@ -3,20 +3,20 @@
 use fuel_core::{
     chain_config::StateConfig,
     p2p_test_helpers::{
-        make_nodes,
         BootstrapSetup,
         BootstrapType,
         Nodes,
         ProducerSetup,
         ValidatorSetup,
+        make_nodes,
     },
 };
 use fuel_core_client::client::FuelClient;
 use fuel_core_types::{
     fuel_tx::{
         input::{
-            coin::CoinSigned,
             Empty,
+            coin::CoinSigned,
         },
         *,
     },
@@ -25,8 +25,8 @@ use fuel_core_types::{
 };
 use futures::StreamExt;
 use rand::{
-    rngs::StdRng,
     SeedableRng,
+    rngs::StdRng,
 };
 use std::{
     collections::hash_map::DefaultHasher,
@@ -172,7 +172,7 @@ async fn test_tx_gossiping_invalid_txs(
         let invalid_tx = TransactionBuilder::script(vec![], vec![])
             .add_input(Input::CoinSigned(CoinSigned {
                 utxo_id: coin.utxo_id(),
-                owner: coin.owner,
+                owner: coin.owner.clone().into(),
                 amount: coin.amount,
                 asset_id: coin.asset_id,
                 tx_pointer: Default::default(),

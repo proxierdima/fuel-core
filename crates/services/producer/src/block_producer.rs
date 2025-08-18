@@ -1,4 +1,5 @@
 use crate::{
+    Config,
     block_producer::gas_price::{
         ChainStateInfoProvider,
         GasPriceProvider as GasPriceProviderConstraint,
@@ -8,11 +9,10 @@ use crate::{
         BlockProducerDatabase,
         RelayerBlockInfo,
     },
-    Config,
 };
 use anyhow::{
-    anyhow,
     Context,
+    anyhow,
 };
 use fuel_core_storage::transactional::{
     AtomicView,
@@ -30,11 +30,11 @@ use fuel_core_types::{
         primitives::DaBlockHeight,
     },
     fuel_tx::{
+        Transaction,
         field::{
             InputContract,
             MintGasPrice,
         },
-        Transaction,
     },
     fuel_types::{
         BlockHeight,
@@ -43,8 +43,8 @@ use fuel_core_types::{
     services::{
         block_producer::Components,
         executor::{
+            DryRunResult,
             StorageReadReplayEvent,
-            TransactionExecutionStatus,
             UncommittedResult,
         },
     },
@@ -130,6 +130,8 @@ where
         let block_time = predefined_block.header().consensus().time;
 
         let da_height = predefined_block.header().da_height();
+
+        self.relayer.wait_for_at_least_height(&da_height).await?;
 
         let view = self.view_provider.latest_view()?;
 
@@ -265,14 +267,14 @@ where
 }
 
 impl<
-        ViewProvider,
-        TxPool,
-        Executor,
-        TxSource,
-        GasPriceProvider,
-        ChainStateProvider,
-        Deadline,
-    > Producer<ViewProvider, TxPool, Executor, GasPriceProvider, ChainStateProvider>
+    ViewProvider,
+    TxPool,
+    Executor,
+    TxSource,
+    GasPriceProvider,
+    ChainStateProvider,
+    Deadline,
+> Producer<ViewProvider, TxPool, Executor, GasPriceProvider, ChainStateProvider>
 where
     ViewProvider: AtomicView + 'static,
     ViewProvider::LatestView: BlockProducerDatabase,
@@ -343,7 +345,8 @@ where
         time: Option<Tai64>,
         utxo_validation: Option<bool>,
         gas_price: Option<u64>,
-    ) -> anyhow::Result<Vec<(Transaction, TransactionExecutionStatus)>> {
+        record_storage_reads: bool,
+    ) -> anyhow::Result<DryRunResult> {
         let view = self.view_provider.latest_view()?;
         let latest_height = view.latest_height().unwrap_or_default();
 
@@ -382,19 +385,17 @@ where
         let executor = self.executor.clone();
 
         // use the blocking threadpool for dry_run to avoid clogging up the main async runtime
-        let txs = tokio_rayon::spawn_fifo(
-            move || -> anyhow::Result<Vec<(Transaction, TransactionExecutionStatus)>> {
-                Ok(executor.dry_run(component, utxo_validation, height)?)
-            },
-        )
+        let result = tokio_rayon::spawn_fifo(move || {
+            executor.dry_run(component, utxo_validation, height, record_storage_reads)
+        })
         .await?;
 
-        if txs.iter().any(|(transaction, tx_status)| {
+        if result.transactions.iter().any(|(transaction, tx_status)| {
             transaction.is_script() && tx_status.result.receipts().is_empty()
         }) {
             Err(anyhow!("Expected at least one set of receipts"))
         } else {
-            Ok(txs)
+            Ok(result)
         }
     }
 }

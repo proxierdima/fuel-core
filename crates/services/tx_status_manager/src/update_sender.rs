@@ -8,12 +8,12 @@ use fuel_core_types::fuel_tx::Bytes32;
 use parking_lot::Mutex;
 use tokio::{
     sync::{
+        OwnedSemaphorePermit,
+        Semaphore,
         mpsc::{
             self,
             error::TrySendError,
         },
-        OwnedSemaphorePermit,
-        Semaphore,
     },
     time::Instant,
 };
@@ -27,9 +27,9 @@ use crate::tx_status_stream::{
 };
 
 /// Subscriber channel buffer size.
-/// Subscribers will only ever get at most a submitted
-/// and final transaction status update.
-const BUFFER_SIZE: usize = 2;
+/// Subscribers will only ever get at most a submitted,
+/// a preconfirmation and final transaction status update.
+const BUFFER_SIZE: usize = 3;
 
 #[derive(Clone)]
 pub struct TxStatusChange {

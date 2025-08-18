@@ -1,6 +1,6 @@
 # Stage 1: Build
 FROM --platform=$BUILDPLATFORM tonistiigi/xx AS xx
-FROM --platform=$BUILDPLATFORM rust:1.81.0 AS chef
+FROM --platform=$BUILDPLATFORM rust:1.86.0 AS chef
 
 ARG TARGETPLATFORM
 RUN cargo install cargo-chef && rustup target add wasm32-unknown-unknown
@@ -46,7 +46,12 @@ RUN \
 # all layers should be cached.
 COPY . .
 # download latest chain-configuration repo after cache to ensure most recent version
-RUN git clone --depth=1 https://github.com/FuelLabs/chain-configuration.git /chain-config
+# also delete large directories to avoid size bloat
+RUN \
+    git clone --depth=1 https://github.com/FuelLabs/chain-configuration.git /chain-config \
+    && rm -fr /chain-config/.git \
+    && rm -fr /chain-config/.github \
+    && rm -fr /chain-config/upgradelog
 # build application
 # note this puts the builds outside of the cache dirs so the run image can copy them
 RUN \

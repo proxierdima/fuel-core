@@ -1,19 +1,19 @@
 use anyhow::anyhow;
 use clap::{
-    builder::ArgPredicate::IsPresent,
     Args,
+    builder::ArgPredicate::IsPresent,
 };
 use fuel_core::{
     p2p::{
+        Multiaddr,
         config::{
-            convert_to_libp2p_keypair,
             Config,
-            NotInitialized,
             MAX_RESPONSE_SIZE,
+            NotInitialized,
+            convert_to_libp2p_keypair,
         },
         gossipsub_config::default_gossipsub_builder,
         heartbeat,
-        Multiaddr,
     },
     types::{
         fuel_crypto,
@@ -25,7 +25,10 @@ use std::{
         IpAddr,
         Ipv4Addr,
     },
-    num::NonZeroU32,
+    num::{
+        NonZeroU32,
+        NonZeroUsize,
+    },
     path::PathBuf,
     str::FromStr,
 };
@@ -209,6 +212,10 @@ pub struct P2PArgs {
     /// Subscribe to pre-confirmation gossip topic
     #[clap(long = "subscribe-to-pre-confirmations", env)]
     subscribe_to_pre_confirmations: bool,
+
+    /// Size of the cache for the P2P req/res protocol.
+    #[clap(long = "p2p-cache-size", default_value = "1000", env)]
+    pub cache_size: Option<NonZeroUsize>,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -237,18 +244,14 @@ impl KeypairArg {
             return Ok(KeypairArg::InlineSecret(secret))
         }
         let path = PathBuf::from_str(s);
-        if let Ok(pathbuf) = path {
-            if pathbuf.exists() {
-                return Ok(KeypairArg::Path(pathbuf))
-            } else {
-                return Err(anyhow!(
-                    "path `{pathbuf:?}` does not exist for keypair argument"
-                ))
-            }
+        let Ok(pathbuf) = path;
+        if pathbuf.exists() {
+            Ok(KeypairArg::Path(pathbuf))
+        } else {
+            Err(anyhow!(
+                "path `{pathbuf:?}` does not exist for keypair argument"
+            ))
         }
-        Err(anyhow!(
-            "invalid keypair argument, neither a valid key or path"
-        ))
     }
 }
 
@@ -354,6 +357,7 @@ impl P2PArgs {
             tx_pool_threads: self.tx_pool_threads,
             state: NotInitialized,
             subscribe_to_pre_confirmations: self.subscribe_to_pre_confirmations,
+            cache_size: self.cache_size,
         };
         Ok(Some(config))
     }
@@ -372,8 +376,9 @@ mod tests {
 
         // Then
         let err = keypair.expect_err("The path is incorrect it should fail");
-        assert!(err
-            .to_string()
-            .contains("does not exist for keypair argument"));
+        assert!(
+            err.to_string()
+                .contains("does not exist for keypair argument")
+        );
     }
 }

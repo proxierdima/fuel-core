@@ -4,8 +4,8 @@ use std::{
 };
 
 use adapters::{
-    ready_signal::ReadySignal,
     TxStatusManagerAdapter,
+    ready_signal::ReadySignal,
 };
 pub use config::{
     Config,
@@ -30,6 +30,8 @@ use fuel_core_services::{
     TaskNextAction,
 };
 use fuel_core_storage::{
+    IsNotFound,
+    StorageAsMut,
     not_found,
     tables::SealedBlockConsensus,
     transactional::{
@@ -37,10 +39,11 @@ use fuel_core_storage::{
         ReadTransaction,
         StorageChanges,
     },
-    IsNotFound,
-    StorageAsMut,
 };
-use fuel_core_types::blockchain::consensus::Consensus;
+use fuel_core_types::{
+    blockchain::consensus::Consensus,
+    fuel_types::BlockHeight,
+};
 
 use crate::{
     combined_database::{
@@ -91,6 +94,8 @@ pub struct SharedState {
     pub executor: ExecutorAdapter,
     /// The config of the service.
     pub config: Config,
+    /// The compression service shared data.
+    pub compression: Option<fuel_core_compression_service::service::SharedData>,
 }
 
 pub struct FuelService {
@@ -145,12 +150,12 @@ impl FuelService {
 
         let (services, shared) = sub_services::init_sub_services(
             &config,
-            database,
+            database.clone(),
             block_production_ready_signal.clone(),
         )?;
 
         let sub_services = Arc::new(services);
-        let task = Task::new(sub_services.clone(), shared.clone())?;
+        let task = Task::new(sub_services.clone(), database, shared.clone())?;
         let runner = ServiceRunner::new_with_params(
             task,
             TaskParams {
@@ -183,6 +188,7 @@ impl FuelService {
     ) -> anyhow::Result<Self> {
         let combined_database = CombinedDatabase::new(
             database,
+            Default::default(),
             Default::default(),
             Default::default(),
             Default::default(),
@@ -222,6 +228,18 @@ impl FuelService {
     pub async fn await_relayer_synced(&self) -> anyhow::Result<()> {
         if let Some(relayer_handle) = &self.runner.shared.relayer {
             relayer_handle.await_synced().await?;
+        }
+        Ok(())
+    }
+
+    /// Waits until the compression service has synced
+    /// with the given block height
+    pub async fn await_compression_synced_until(
+        &self,
+        block_height: &BlockHeight,
+    ) -> anyhow::Result<()> {
+        if let Some(sync_observer) = &self.runner.shared.compression {
+            sync_observer.await_synced_until(block_height).await?;
         }
         Ok(())
     }
@@ -398,14 +416,24 @@ pub type SubServices = Vec<Box<dyn ServiceTrait + Send + Sync + 'static>>;
 struct Task {
     /// The list of started sub services.
     services: Arc<SubServices>,
+    /// The copies of the databases used by services.
+    database: CombinedDatabase,
     /// The address bound by the system for serving the API
     pub shared: SharedState,
 }
 
 impl Task {
     /// Private inner method for initializing the fuel service task
-    pub fn new(services: Arc<SubServices>, shared: SharedState) -> anyhow::Result<Task> {
-        Ok(Task { services, shared })
+    pub fn new(
+        services: Arc<SubServices>,
+        database: CombinedDatabase,
+        shared: SharedState,
+    ) -> anyhow::Result<Task> {
+        Ok(Task {
+            services,
+            database,
+            shared,
+        })
     }
 }
 
@@ -480,6 +508,7 @@ impl RunnableTask for Task {
                 );
             }
         }
+        self.database.shutdown();
         Ok(())
     }
 }
@@ -488,11 +517,11 @@ impl RunnableTask for Task {
 #[cfg(test)]
 mod tests {
     use crate::{
+        ShutdownListener,
         service::{
             Config,
             FuelService,
         },
-        ShutdownListener,
     };
     use fuel_core_services::State;
     use std::{
@@ -545,8 +574,8 @@ mod tests {
         // }
         #[cfg(feature = "p2p")]
         {
-            // p2p & sync
-            expected_services += 2;
+            // p2p & sync & preconfirmation signature service
+            expected_services += 3;
         }
         #[cfg(feature = "shared-sequencer")]
         {

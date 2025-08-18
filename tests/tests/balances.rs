@@ -1,9 +1,9 @@
 use fuel_core::{
     chain_config::{
-        coin_config_helpers::CoinConfigGenerator,
         CoinConfig,
         MessageConfig,
         StateConfig,
+        coin_config_helpers::CoinConfigGenerator,
     },
     service::{
         Config,
@@ -12,6 +12,7 @@ use fuel_core::{
     state::historical_rocksdb::StateRewindPolicy,
 };
 use fuel_core_client::client::{
+    FuelClient,
     pagination::{
         PageDirection,
         PaginationRequest,
@@ -20,14 +21,13 @@ use fuel_core_client::client::{
         Address,
         AssetId,
     },
-    FuelClient,
 };
 use fuel_core_poa::Trigger;
 use fuel_core_types::{
     blockchain::primitives::DaBlockHeight,
     fuel_tx::{
-        Bytes32,
         ContractIdExt,
+        SubAssetId,
     },
 };
 use rand::SeedableRng;
@@ -57,7 +57,7 @@ async fn balance() {
         ]
         .into_iter()
         .map(|(owner, amount, asset_id)| CoinConfig {
-            owner,
+            owner: owner.into(),
             amount,
             asset_id,
             ..coin_generator.generate()
@@ -138,7 +138,7 @@ async fn balance_messages_only() {
     let client = FuelClient::from(srv.bound_address);
 
     // run test
-    const NON_RETRYABLE_AMOUNT: u64 = 60 + 90;
+    const NON_RETRYABLE_AMOUNT: u128 = 60 + 90;
     let balance = client.balance(&owner, Some(&asset_id)).await.unwrap();
     assert_eq!(balance, NON_RETRYABLE_AMOUNT);
 }
@@ -221,7 +221,7 @@ async fn first_5_balances() {
                         ]
                     })
                     .map(|(owner, amount, asset_id)| CoinConfig {
-                        owner: *owner,
+                        owner: (*owner).into(),
                         amount,
                         asset_id,
                         ..coin_generator.generate()
@@ -297,21 +297,21 @@ async fn first_5_balances() {
 mod pagination {
     use fuel_core::{
         chain_config::{
-            coin_config_helpers::CoinConfigGenerator,
             ChainConfig,
             CoinConfig,
             MessageConfig,
             StateConfig,
+            coin_config_helpers::CoinConfigGenerator,
         },
         service::Config,
     };
     use fuel_core_bin::FuelService;
     use fuel_core_client::client::{
+        FuelClient,
         pagination::{
             PageDirection,
             PaginationRequest,
         },
-        FuelClient,
     };
     use fuel_core_types::{
         blockchain::primitives::DaBlockHeight,
@@ -337,7 +337,7 @@ mod pagination {
                 coin.iter()
                     .flat_map(|(asset_id, amount)| vec![(owner, amount, asset_id)])
                     .map(|(owner, amount, asset_id)| CoinConfig {
-                        owner: *owner,
+                        owner: (*owner).into(),
                         amount: *amount as u64,
                         asset_id: *asset_id,
                         ..coin_generator.generate()
@@ -460,7 +460,7 @@ mod pagination {
                     .map(|r| (r.asset_id, r.amount)),
             );
             if !paginated_result.has_next_page {
-                break
+                break;
             }
         }
 
@@ -531,7 +531,7 @@ mod pagination {
 
             cursor = paginated_result.cursor;
             if !paginated_result.has_next_page {
-                break
+                break;
             }
         }
 
@@ -562,7 +562,7 @@ async fn contract_balances_in_the_past() {
     let client = FuelClient::from(srv.bound_address);
 
     // Given
-    let sub_asset_id = Bytes32::new([1u8; 32]);
+    let sub_asset_id = SubAssetId::new([1u8; 32]);
     let amount = 1234;
 
     let (deployed_height, contract_id) = mint_contract::deploy(&client, &mut rng).await;
@@ -592,7 +592,7 @@ async fn contract_balances_in_the_past() {
     assert_eq!(balances_at_minted.len(), 1);
     assert_eq!(balances_at_minted[0].amount.0, amount);
     assert_eq!(
-        balances_at_minted[0].asset_id.0 .0,
+        balances_at_minted[0].asset_id.0.0,
         contract_id.asset_id(&sub_asset_id)
     );
 }

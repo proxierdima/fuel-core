@@ -5,37 +5,51 @@ use super::{
     SharedMemoryPool,
     StaticGasPrice,
     TxStatusManagerAdapter,
+    compression_adapters::CompressionServiceAdapter,
+    import_result_provider,
 };
 use crate::{
-    database::OnChainIterableKeyValueView,
+    database::{
+        Database,
+        OnChainIterableKeyValueView,
+        database_description::compression::CompressionDatabase,
+    },
     fuel_core_graphql_api::ports::{
-        worker::{
-            self,
-            BlockAt,
-        },
         BlockProducerPort,
         ChainStateProvider,
         DatabaseMessageProof,
         GasPriceEstimate,
         P2pPort,
         TxPoolPort,
+        worker::{
+            self,
+            BlockAt,
+        },
     },
     graphql_api::ports::{
+        DatabaseDaCompressedBlocks,
         MemoryPool,
         TxStatusManager,
     },
     service::{
         adapters::{
-            import_result_provider::ImportResultProvider,
             P2PAdapter,
             TxPoolAdapter,
+            import_result_provider::ImportResultProvider,
         },
         vm_pool::MemoryFromPool,
     },
 };
 use async_trait::async_trait;
+use fuel_core_compression_service::storage::CompressedBlocks;
 use fuel_core_services::stream::BoxStream;
-use fuel_core_storage::Result as StorageResult;
+use fuel_core_storage::{
+    Result as StorageResult,
+    blueprint::BlueprintInspect,
+    kv_store::KeyValueInspect,
+    not_found,
+    structured_storage::TableWithBlueprint,
+};
 use fuel_core_tx_status_manager::TxStatusMessage;
 use fuel_core_txpool::TxPoolStats;
 use fuel_core_types::{
@@ -54,11 +68,11 @@ use fuel_core_types::{
     services::{
         block_importer::SharedImportResult,
         executor::{
+            DryRunResult,
             StorageReadReplayEvent,
-            TransactionExecutionStatus,
         },
         p2p::PeerInfo,
-        txpool::TransactionStatus,
+        transaction_status::TransactionStatus,
     },
     tai64::Tai64,
 };
@@ -81,6 +95,12 @@ impl TxStatusManager for TxStatusManagerAdapter {
         tx_id: TxId,
     ) -> anyhow::Result<BoxStream<TxStatusMessage>> {
         self.tx_status_manager_shared_data.subscribe(tx_id).await
+    }
+
+    fn subscribe_txs_updates(
+        &self,
+    ) -> anyhow::Result<BoxStream<anyhow::Result<(TxId, TransactionStatus)>>> {
+        self.tx_status_manager_shared_data.subscribe_all()
     }
 }
 
@@ -126,9 +146,17 @@ impl BlockProducerPort for BlockProducerAdapter {
         time: Option<Tai64>,
         utxo_validation: Option<bool>,
         gas_price: Option<u64>,
-    ) -> anyhow::Result<Vec<(Transaction, TransactionExecutionStatus)>> {
+        record_storage_reads: bool,
+    ) -> anyhow::Result<DryRunResult> {
         self.block_producer
-            .dry_run(transactions, height, time, utxo_validation, gas_price)
+            .dry_run(
+                transactions,
+                height,
+                time,
+                utxo_validation,
+                gas_price,
+                record_storage_reads,
+            )
             .await
     }
 
@@ -146,29 +174,32 @@ impl P2pPort for P2PAdapter {
         #[cfg(feature = "p2p")]
         {
             use fuel_core_types::services::p2p::HeartbeatData;
-            if let Some(service) = &self.service {
-                let peers = service.get_all_peers().await?;
-                Ok(peers
-                    .into_iter()
-                    .map(|(peer_id, peer_info)| PeerInfo {
-                        id: fuel_core_types::services::p2p::PeerId::from(
-                            peer_id.to_bytes(),
-                        ),
-                        peer_addresses: peer_info
-                            .peer_addresses
-                            .iter()
-                            .map(|addr| addr.to_string())
-                            .collect(),
-                        client_version: None,
-                        heartbeat_data: HeartbeatData {
-                            block_height: peer_info.heartbeat_data.block_height,
-                            last_heartbeat: peer_info.heartbeat_data.last_heartbeat_sys,
-                        },
-                        app_score: peer_info.score,
-                    })
-                    .collect())
-            } else {
-                Ok(vec![])
+            match &self.service {
+                Some(service) => {
+                    let peers = service.get_all_peers().await?;
+                    Ok(peers
+                        .into_iter()
+                        .map(|(peer_id, peer_info)| PeerInfo {
+                            id: fuel_core_types::services::p2p::PeerId::from(
+                                peer_id.to_bytes(),
+                            ),
+                            peer_addresses: peer_info
+                                .peer_addresses
+                                .iter()
+                                .map(|addr| addr.to_string())
+                                .collect(),
+                            client_version: None,
+                            heartbeat_data: HeartbeatData {
+                                block_height: peer_info.heartbeat_data.block_height,
+                                last_heartbeat: peer_info
+                                    .heartbeat_data
+                                    .last_heartbeat_sys,
+                            },
+                            app_score: peer_info.score,
+                        })
+                        .collect())
+                }
+                _ => Ok(vec![]),
             }
         }
         #[cfg(not(feature = "p2p"))]
@@ -235,6 +266,15 @@ impl GraphQLBlockImporter {
     }
 }
 
+impl From<BlockAt> for import_result_provider::BlockAt {
+    fn from(value: BlockAt) -> Self {
+        match value {
+            BlockAt::Genesis => Self::Genesis,
+            BlockAt::Specific(h) => Self::Specific(h),
+        }
+    }
+}
+
 impl worker::BlockImporter for GraphQLBlockImporter {
     fn block_events(&self) -> BoxStream<SharedImportResult> {
         self.block_importer_adapter.events_shared_result()
@@ -244,7 +284,8 @@ impl worker::BlockImporter for GraphQLBlockImporter {
         &self,
         height: BlockAt,
     ) -> anyhow::Result<SharedImportResult> {
-        self.import_result_provider_adapter.result_at_height(height)
+        self.import_result_provider_adapter
+            .result_at_height(height.into())
     }
 }
 
@@ -254,5 +295,22 @@ impl MemoryPool for SharedMemoryPool {
 
     async fn get_memory(&self) -> Self::Memory {
         self.memory_pool.take_raw().await
+    }
+}
+
+impl DatabaseDaCompressedBlocks for CompressionServiceAdapter {
+    fn da_compressed_block(&self, height: &BlockHeight) -> StorageResult<Vec<u8>> {
+        use fuel_core_storage::codec::Encode;
+
+        let encoded_height =
+            <<CompressedBlocks as TableWithBlueprint>::Blueprint as BlueprintInspect<
+                CompressedBlocks,
+                Database<CompressionDatabase>, /* in the future it would be nice to use a dummy impl, but it's not worth the effort rn */
+            >>::KeyCodec::encode(height);
+        let column = <CompressedBlocks as TableWithBlueprint>::column();
+        self.storage()
+            .get(&encoded_height, column)?
+            .ok_or_else(|| not_found!(CompressedBlocks))
+            .map(|block| block.to_vec())
     }
 }

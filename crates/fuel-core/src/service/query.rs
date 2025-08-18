@@ -7,7 +7,8 @@ use fuel_core_types::{
         UniqueIdentifier,
     },
     fuel_types::Bytes32,
-    services::txpool::TransactionStatus as TxPoolTxStatus,
+    services::transaction_status::TransactionStatus as TxPoolTxStatus,
+    tai64::Tai64,
 };
 use futures::{
     Stream,
@@ -17,8 +18,8 @@ use futures::{
 use crate::{
     database::OffChainIterableKeyValueView,
     query::{
-        transaction_status_change,
         TxnStatusChangeState,
+        transaction_status_change,
     },
     schema::tx::types::TransactionStatus,
 };
@@ -65,9 +66,7 @@ impl FuelService {
             .consensus_parameters
             .chain_id());
         let stream = self.transaction_status_change(id).await?.filter(|status| {
-            futures::future::ready(
-                status.as_ref().map_or(false, |status| status.is_final()),
-            )
+            futures::future::ready(status.as_ref().is_ok_and(|status| status.is_final()))
         });
         futures::pin_mut!(stream);
         self.submit(tx).await?;
@@ -82,14 +81,15 @@ impl FuelService {
         &self,
         id: Bytes32,
     ) -> anyhow::Result<impl Stream<Item = anyhow::Result<TransactionStatus>> + '_> {
+        // First subscribe to the statuses, and only after that create a view.
         let tx_status_manager = &self.shared.tx_status_manager;
-        let db = self.shared.database.off_chain().latest_view()?;
         let rx = tx_status_manager.tx_update_subscribe(id).await?;
+        let db = self.shared.database.off_chain().latest_view()?;
         let state = StatusChangeState {
             db,
             tx_status_manager,
         };
-        Ok(transaction_status_change(state, rx, id).await)
+        Ok(transaction_status_change(state, rx, id, true).await)
     }
 }
 
@@ -98,12 +98,29 @@ struct StatusChangeState<'a> {
     tx_status_manager: &'a TxStatusManagerAdapter,
 }
 
-impl<'a> TxnStatusChangeState for StatusChangeState<'a> {
-    async fn get_tx_status(&self, id: Bytes32) -> StorageResult<Option<TxPoolTxStatus>> {
+impl TxnStatusChangeState for StatusChangeState<'_> {
+    async fn get_tx_status(
+        &self,
+        id: Bytes32,
+        include_preconfirmation: bool,
+    ) -> StorageResult<Option<TxPoolTxStatus>> {
         match self.db.get_tx_status(&id)? {
             Some(status) => Ok(Some(status.into())),
             None => {
                 let status = self.tx_status_manager.status(id).await?;
+                let status = status.map(|status| {
+                    // Filter out preconfirmation statuses if not allowed. Converting to submitted status
+                    // because it's the closest to the preconfirmation status.
+                    // Having `now()` as timestamp isn't ideal but shouldn't cause much inconsistency.
+                    if !include_preconfirmation
+                        && status.is_preconfirmation()
+                        && !status.is_final()
+                    {
+                        TxPoolTxStatus::submitted(Tai64::now())
+                    } else {
+                        status
+                    }
+                });
                 Ok(status)
             }
         }

@@ -1,40 +1,47 @@
 use crate::{
     database::{
+        Error as DatabaseError,
         database_description::{
-            off_chain::OffChain,
-            on_chain::OnChain,
-            relayer::Relayer,
             DatabaseDescription,
             DatabaseHeight,
             DatabaseMetadata,
+            off_chain::OffChain,
+            on_chain::OnChain,
+            relayer::Relayer,
         },
         metadata::MetadataTable,
-        Error as DatabaseError,
     },
     graphql_api::storage::blocks::FuelBlockIdsToHeights,
     state::{
+        ColumnType,
+        IterableKeyValueView,
+        KeyValueView,
         data_source::{
             DataSource,
             DataSourceType,
         },
         generic_database::GenericDatabase,
         in_memory::memory_store::MemoryStore,
-        ColumnType,
-        IterableKeyValueView,
-        KeyValueView,
     },
 };
+use database_description::compression::CompressionDatabase;
 use fuel_core_chain_config::TableEntry;
 pub use fuel_core_database::Error;
 use fuel_core_gas_price_service::common::fuel_core_storage_adapter::storage::GasPriceMetadata;
 use fuel_core_services::SharedMutex;
 use fuel_core_storage::{
     self,
+    Error as StorageError,
+    Mappable,
+    Result as StorageResult,
+    StorageAsMut,
+    StorageInspect,
+    StorageMutate,
     iter::{
-        changes_iterator::ChangesIterator,
         IterDirection,
         IterableTable,
         IteratorOverTable,
+        changes_iterator::ChangesIterator,
     },
     not_found,
     tables::FuelBlocks,
@@ -47,12 +54,6 @@ use fuel_core_storage::{
         StorageChanges,
         StorageTransaction,
     },
-    Error as StorageError,
-    Mappable,
-    Result as StorageResult,
-    StorageAsMut,
-    StorageInspect,
-    StorageMutate,
 };
 use fuel_core_types::{
     blockchain::block::CompressedBlock,
@@ -71,9 +72,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 #[cfg(feature = "rocksdb")]
 use crate::state::{
     historical_rocksdb::{
-        description::Historical,
         HistoricalRocksDB,
         StateRewindPolicy,
+        description::Historical,
     },
     rocks_db::{
         ColumnsPolicy,
@@ -179,6 +180,12 @@ where
     {
         self.iter_all_filtered::<T, _>(prefix, None, Some(direction))
             .map_ok(|(key, value)| TableEntry { key, value })
+    }
+
+    pub fn shutdown(self) {
+        let (storage, _) = self.into_inner();
+
+        storage.data.shutdown()
     }
 }
 
@@ -446,6 +453,15 @@ impl Modifiable for Database<Relayer> {
     }
 }
 
+impl Modifiable for Database<CompressionDatabase> {
+    fn commit_changes(&mut self, changes: Changes) -> StorageResult<()> {
+        commit_changes_with_height_update(self, changes, |iter| {
+            iter.iter_all_keys::<fuel_core_compression_service::storage::CompressedBlocks>(Some(IterDirection::Reverse))
+                .try_collect()
+        })
+    }
+}
+
 #[cfg(not(feature = "relayer"))]
 impl Modifiable for Database<Relayer> {
     fn commit_changes(&mut self, changes: Changes) -> StorageResult<()> {
@@ -500,7 +516,7 @@ where
         .into());
     }
 
-    let new_height = new_heights.into_iter().last();
+    let new_height = new_heights.into_iter().next_back();
     let prev_height = *database.stage.height.lock();
 
     match (prev_height, new_height) {
@@ -623,8 +639,8 @@ pub fn convert_to_rocksdb_direction(direction: IterDirection) -> rocksdb::Direct
 mod tests {
     use super::*;
     use crate::database::{
-        database_description::DatabaseDescription,
         Database,
+        database_description::DatabaseDescription,
     };
 
     fn column_keys_not_exceed_count<Description>()
@@ -642,8 +658,8 @@ mod tests {
     mod on_chain {
         use super::*;
         use crate::database::{
-            database_description::on_chain::OnChain,
             DatabaseHeight,
+            database_description::on_chain::OnChain,
         };
         use fuel_core_storage::{
             tables::Coins,
@@ -807,18 +823,13 @@ mod tests {
         use super::*;
         use crate::{
             database::{
-                database_description::off_chain::OffChain,
                 DatabaseHeight,
+                database_description::off_chain::OffChain,
             },
             fuel_core_graphql_api::storage::messages::OwnedMessageKey,
             graphql_api::storage::messages::OwnedMessageIds,
         };
         use fuel_core_storage::transactional::WriteTransaction;
-
-        #[test]
-        fn column_keys_not_exceed_count_test() {
-            column_keys_not_exceed_count::<OffChain>();
-        }
 
         #[test]
         fn database_advances_with_a_new_block() {
@@ -968,8 +979,8 @@ mod tests {
     mod relayer {
         use super::*;
         use crate::database::{
-            database_description::relayer::Relayer,
             DatabaseHeight,
+            database_description::relayer::Relayer,
         };
         use fuel_core_relayer::storage::EventsHistory;
         use fuel_core_storage::transactional::WriteTransaction;
@@ -1192,10 +1203,10 @@ mod tests {
         use strum::EnumCount;
 
         use super::{
-            database_description::DatabaseDescription,
-            update_metadata,
             DatabaseHeight,
             DatabaseMetadata,
+            database_description::DatabaseDescription,
+            update_metadata,
         };
 
         #[derive(Debug, Copy, Clone, Default, PartialEq, Eq)]

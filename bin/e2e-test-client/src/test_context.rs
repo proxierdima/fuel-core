@@ -1,22 +1,22 @@
 //! Utilities and helper methods for writing tests
 
 use anyhow::{
-    anyhow,
     Context,
+    anyhow,
 };
 use fuel_core_chain_config::ContractConfig;
 use fuel_core_client::client::{
+    FuelClient,
     types::{
         CoinType,
         TransactionStatus,
     },
-    FuelClient,
 };
 use fuel_core_types::{
     fuel_asm::{
-        op,
         GTFArgs,
         RegId,
+        op,
     },
     fuel_crypto::PublicKey,
     fuel_tx::{
@@ -33,10 +33,10 @@ use fuel_core_types::{
         UtxoId,
     },
     fuel_types::{
-        canonical::Serialize,
         Address,
         AssetId,
         Salt,
+        canonical::Serialize,
     },
     fuel_vm::SecretKey,
 };
@@ -103,7 +103,7 @@ impl Wallet {
     }
 
     /// returns the balance associated with a wallet
-    pub async fn balance(&self, asset_id: Option<AssetId>) -> anyhow::Result<u64> {
+    pub async fn balance(&self, asset_id: Option<AssetId>) -> anyhow::Result<u128> {
         self.client
             .balance(&self.address, Some(&asset_id.unwrap_or_default()))
             .await
@@ -186,6 +186,7 @@ impl Wallet {
         let tx_id = tx.id(&self.consensus_params.chain_id());
         println!("submitting tx... {:?}", tx_id);
         let status = self.client.submit_and_await_commit(&tx).await?;
+        println!("Status for {:?} is {:?}", tx_id, status);
 
         // we know the transferred coin should be output 0 from above
         let transferred_utxo = UtxoId::new(tx_id, 0);

@@ -3,6 +3,7 @@
 #[cfg(feature = "smt")]
 mod smt {
     use crate::{
+        Mappable,
         blueprint::sparse::{
             PrimaryKey,
             Sparse,
@@ -11,13 +12,12 @@ mod smt {
         column::Column,
         structured_storage::TableWithBlueprint,
         tables::{
+            ContractsState,
             merkle::{
                 ContractsStateMerkleData,
                 ContractsStateMerkleMetadata,
             },
-            ContractsState,
         },
-        Mappable,
     };
     use alloc::borrow::Cow;
 
@@ -50,7 +50,15 @@ mod smt {
     }
 
     #[cfg(test)]
+    #[allow(non_snake_case)]
     mod test {
+        use rand::{
+            Rng,
+            prelude::StdRng,
+        };
+
+        use crate::blueprint::sparse::root_storage_tests_smt::SMTTestDataGenerator;
+
         use super::*;
 
         fn generate_key(
@@ -76,32 +84,48 @@ mod smt {
             generate_key_for_same_contract
         );
 
-        fn generate_value(rng: &mut impl rand::Rng) -> Vec<u8> {
-            let mut bytes = [0u8; 32];
-            rng.fill(bytes.as_mut());
-            bytes.to_vec()
+        impl SMTTestDataGenerator for ContractsState {
+            type Key = <ContractsState as Mappable>::Key;
+            type PrimaryKey = <ContractsStateMerkleMetadata as Mappable>::Key;
+            type Value = <ContractsState as Mappable>::OwnedValue;
+
+            fn primary_key() -> Self::PrimaryKey {
+                fuel_core_types::fuel_tx::ContractId::from([1u8; 32])
+            }
+
+            fn foreign_key() -> Self::PrimaryKey {
+                fuel_core_types::fuel_tx::ContractId::from([2u8; 32])
+            }
+
+            fn generate_key(
+                current_key: &Self::PrimaryKey,
+                rng: &mut StdRng,
+            ) -> Self::Key {
+                let mut bytes = [0u8; 32];
+                rng.fill(bytes.as_mut());
+                <ContractsState as Mappable>::Key::new(current_key, &bytes.into())
+            }
+
+            fn generate_value(rng: &mut StdRng) -> Self::Value {
+                let mut bytes = [0u8; 32];
+                rng.fill(bytes.as_mut());
+                <ContractsState as Mappable>::OwnedValue::from(bytes.as_slice())
+            }
         }
 
-        crate::root_storage_tests!(
-            ContractsState,
-            ContractsStateMerkleMetadata,
-            <ContractsStateMerkleMetadata as Mappable>::Key::from([1u8; 32]),
-            <ContractsStateMerkleMetadata as Mappable>::Key::from([2u8; 32]),
-            generate_key,
-            generate_value
-        );
+        crate::root_storage_tests!(ContractsState);
     }
 
     #[cfg(test)]
     #[allow(non_snake_case)]
     mod structured_storage_tests {
         use crate::{
-            column::Column,
-            structured_storage::test::InMemoryStorage,
-            transactional::ReadTransaction,
             StorageAsMut,
             StorageMutate,
             StorageWrite,
+            column::Column,
+            structured_storage::test::InMemoryStorage,
+            transactional::ReadTransaction,
         };
         use fuel_vm_private::{
             prelude::{
@@ -114,9 +138,9 @@ mod smt {
             },
         };
         use rand::{
-            prelude::StdRng,
             Rng,
             SeedableRng,
+            prelude::StdRng,
         };
 
         #[test]
@@ -127,7 +151,7 @@ mod smt {
 
             // Given
             let contract_id = ContractId::default();
-            let keys = std::iter::from_fn(|| Some(rng.gen::<Bytes32>()))
+            let keys = std::iter::from_fn(|| Some(rng.r#gen::<Bytes32>()))
                 .take(10)
                 .map(|state_key| ContractsStateKey::from((&contract_id, &state_key)))
                 .collect::<Vec<_>>();
@@ -192,7 +216,7 @@ mod smt {
 
             // Given
             let contract_id = ContractId::default();
-            let keys = std::iter::from_fn(|| Some(rng.gen::<Bytes32>()))
+            let keys = std::iter::from_fn(|| Some(rng.r#gen::<Bytes32>()))
                 .take(10)
                 .map(|state_key| ContractsStateKey::from((&contract_id, &state_key)))
                 .collect::<Vec<_>>();
@@ -257,7 +281,7 @@ mod smt {
 
             // Given
             let contract_id = ContractId::default();
-            let keys = std::iter::from_fn(|| Some(rng.gen::<Bytes32>()))
+            let keys = std::iter::from_fn(|| Some(rng.r#gen::<Bytes32>()))
                 .take(10)
                 .map(|state_key| ContractsStateKey::from((&contract_id, &state_key)))
                 .collect::<Vec<_>>();
@@ -286,7 +310,7 @@ mod smt {
             }
 
             // When
-            let state_key = rng.gen::<Bytes32>();
+            let state_key = rng.r#gen::<Bytes32>();
             let key = ContractsStateKey::from((&contract_id, &state_key));
 
             let merkle_root_replace = {
